@@ -5,12 +5,17 @@ package app.geeflow.data.user
 import app.geeflow.data.user.model.AppPaletteStyle
 import app.geeflow.data.user.model.AppTheme
 import app.geeflow.data.user.model.ChartType
+import app.geeflow.data.user.model.FlowChartRange
 import app.geeflow.data.user.model.TemperatureUnit
 import app.geeflow.data.user.model.ThemeMode
 import kotlinx.coroutines.flow.Flow
 
 interface UserSettingsRepository {
     fun visibleCharts(userId: Long): Flow<Set<ChartType>>
+    fun flowChartRange(userId: Long): Flow<FlowChartRange>
+    fun favoriteProfiles(userId: Long): Flow<Set<String>>
+    suspend fun toggleFavoriteProfile(userId: Long, profileId: String)
+    suspend fun setFavoriteProfile(userId: Long, profileId: String, favorite: Boolean)
     fun darkMode(userId: Long): Flow<ThemeMode>
     fun appTheme(userId: Long): Flow<AppTheme>
     fun paletteStyle(userId: Long): Flow<AppPaletteStyle>
@@ -23,6 +28,7 @@ interface UserSettingsRepository {
     fun autoConnect(userId: Long): Flow<Boolean>
     fun temperatureUnit(userId: Long): Flow<TemperatureUnit>
     suspend fun setVisibleCharts(userId: Long, types: Set<ChartType>)
+    suspend fun setFlowChartRange(userId: Long, range: FlowChartRange)
     suspend fun setDarkMode(userId: Long, mode: ThemeMode)
     suspend fun setAppTheme(userId: Long, theme: AppTheme)
     suspend fun setPaletteStyle(userId: Long, style: AppPaletteStyle)

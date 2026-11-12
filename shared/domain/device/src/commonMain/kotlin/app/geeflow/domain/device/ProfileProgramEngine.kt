@@ -30,6 +30,8 @@ class ProfileProgramEngine(private val profile: BrewProfile) {
     private var previousTarget: PhaseControl? = null
     private var stepVolume: Float? = null
     private var stepWeight: Float? = null
+    private var adaptiveFlowMaximum: Float? = null
+    private var adaptiveFlowHold: Float? = null
     val transitions = mutableListOf<PhaseTransition>()
 
     data class Output(val target: PhaseControl? = null, val phaseId: String? = null, val finish: String? = null)
@@ -69,15 +71,30 @@ class ProfileProgramEngine(private val profile: BrewProfile) {
                 rampFrom = rampStartValue(phase, telemetry)
                 stepVolume = telemetry[BrewMetric.PumpedVolume]
                 stepWeight = telemetry[BrewMetric.CupWeight]
+                adaptiveFlowMaximum = null
+                adaptiveFlowHold = null
                 entered = true
             }
             val phaseTime = elapsed - enteredAt
+            phase.adaptiveFlowProbe?.let { probe ->
+                val pressure = telemetry[BrewMetric.PumpPressure]
+                val flow = telemetry[BrewMetric.PumpFlow]
+                if (
+                    phaseTime < probe.samplingDurationMillis &&
+                    pressure != null && pressure < probe.pressureCeilingBar &&
+                    flow != null
+                ) {
+                    adaptiveFlowMaximum = maxOf(adaptiveFlowMaximum ?: flow, flow)
+                }
+            }
             var matchedCondition: ExitCondition? = null
             val conditionsMet = phaseTime >= phase.minimumDurationMillis && phase.conditionsMet { condition ->
                 val measured = measurement(condition, phaseTime, telemetry) ?: return@conditionsMet false
                 val matches = when (condition.comparison) {
                     ThresholdComparison.Above -> measured >= condition.threshold
                     ThresholdComparison.Below -> measured <= condition.threshold
+                    ThresholdComparison.StrictlyAbove -> measured > condition.threshold
+                    ThresholdComparison.StrictlyBelow -> measured < condition.threshold
                 }
                 if (matches) matchedCondition = condition
                 matches
@@ -99,7 +116,25 @@ class ProfileProgramEngine(private val profile: BrewProfile) {
                 entered = false
                 continue
             }
-            val value = rampFrom + (phase.control.value() - rampFrom) * phase.ramp.fraction(phaseTime)
+            var value = rampFrom + (phase.control.value() - rampFrom) * phase.ramp.fraction(phaseTime)
+            phase.adaptiveFlowProbe?.let { probe ->
+                val pressure = telemetry[BrewMetric.PumpPressure]
+                val flow = telemetry[BrewMetric.PumpFlow]
+                if (phaseTime < probe.samplingDurationMillis) {
+                    if (pressure != null && pressure >= probe.pressureCeilingBar) {
+                        value = minOf(value, adaptiveFlowMaximum ?: rampFrom)
+                    }
+                } else {
+                    if (adaptiveFlowHold == null) adaptiveFlowHold = adaptiveFlowMaximum ?: rampFrom
+                    if (pressure != null && pressure >= probe.pressureCeilingBar && flow != null) {
+                        adaptiveFlowHold = minOf(
+                            requireNotNull(adaptiveFlowHold),
+                            (flow - probe.flowBackoffMillilitresPerSecond).coerceAtLeast(0f),
+                        )
+                    }
+                    value = adaptiveFlowHold ?: rampFrom
+                }
+            }
             return Output(phase.control.withValue(value), phase.id)
         }
         return Output(finish = "program_complete")

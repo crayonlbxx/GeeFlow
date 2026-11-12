@@ -7,11 +7,14 @@ import app.geeflow.data.device.DeviceBrewingControl
 import app.geeflow.data.device.DeviceConnectionControl
 import app.geeflow.data.device.DeviceController
 import app.geeflow.data.device.DeviceHotWaterControl
+import app.geeflow.data.device.MachineDiagnosticEvent
+import app.geeflow.data.device.MachineDiagnosticEventSource
 import app.geeflow.data.device.DeviceMaintenanceControl
 import app.geeflow.data.device.DeviceProfileControl
 import app.geeflow.data.device.DeviceSettingsControl
 import app.geeflow.data.device.TimedPumpProfileSupport
 import app.geeflow.data.device.ble.modbus.ModbusSession
+import app.geeflow.data.device.ble.modbus.ModbusSessionDiagnosticSink
 import app.geeflow.data.device.impl.controller.WendougeeCommands.CMD_SCALE_LIST_REQUEST
 import app.geeflow.data.device.impl.controller.WendougeeCommands.CMD_SCALE_SEARCH_QUERY
 import app.geeflow.data.device.impl.controller.WendougeeCommands.CMD_SCALE_STATUS_REQUEST
@@ -39,6 +42,10 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.isActive
@@ -48,12 +55,20 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
 import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Clock
 
 internal class WendougeeController(
     val model: SupportedDevice,
     private val scope: CoroutineScope,
     private val transport: WendougeeBleTransport,
-) : DeviceController, DeviceConnectionControl {
+) : DeviceController, DeviceConnectionControl, MachineDiagnosticEventSource {
+    private val mutableDiagnosticEvents = MutableSharedFlow<MachineDiagnosticEvent>(extraBufferCapacity = 512)
+    override val diagnosticEvents: SharedFlow<MachineDiagnosticEvent> = mutableDiagnosticEvents.asSharedFlow()
+    private val mutableStopPriority = MutableStateFlow(false)
+    internal val stopPriorityRequested: StateFlow<Boolean> = mutableStopPriority
+
+    internal fun requestStopPriority() { mutableStopPriority.value = true }
+    internal fun clearStopPriority() { mutableStopPriority.value = false }
     override var connectionGeneration: Long = 0
         private set
     override val connection: DeviceConnectionControl get() = this
@@ -70,6 +85,7 @@ internal class WendougeeController(
             SupportedDevice.LitaLR -> shared.copy(
                 native = shared.native?.copy(flow = false),
                 liveFlow = null,
+                liveModeSwitch = false,
             )
             else -> shared
         }
@@ -148,6 +164,9 @@ internal class WendougeeController(
                     defaultTimeout = 1000.milliseconds,
                     completeFrames = true,
                     sessionJob = currentCoroutineContext()[Job],
+                    diagnosticSink = ModbusSessionDiagnosticSink { name, fields ->
+                        mutableDiagnosticEvents.tryEmit(MachineDiagnosticEvent(name, Clock.System.now(), fields))
+                    },
                 )
                 val active = WendougeeSession(link, modbus, responses)
                 session = active
@@ -231,6 +250,7 @@ internal class WendougeeController(
         withTimeout(INIT_POLL_TIMEOUT_MS) { deviceState.first { it.config != null } }
         readWaterAlarmRegister(active)
         val firmware = readWendougeeFirmware(active.modbus)
+        active.profileFormat = resolveWendougeeProfileFormat(model, firmware)
         stateStore.updateMachine {
             it.copy(firmwareVersion = firmware, agileRingSupported = supportsAgileRing(model, firmware))
         }
@@ -252,9 +272,14 @@ internal class WendougeeController(
 
     private suspend fun runPollingLoop(active: WendougeeSession) {
         while (currentCoroutineIsActive()) {
+            if (stopPriorityRequested.value) {
+                delay(STOP_PRIORITY_POLL_DELAY_MS)
+                continue
+            }
             runCatching { pollLongOnce(active) }
                 .onFailure { Logger.withTag(TAG).w(it) { "Poll long missed" } }
             delay(POLL_BETWEEN_DELAY_MS)
+            if (stopPriorityRequested.value) continue
             runCatching { pollShortOnce(active) }
                 .onFailure { Logger.withTag(TAG).w(it) { "Poll short missed" } }
             val interval = if (_deviceState.value.brewStatus == DeviceState.BrewStatus.FreeVariable) {

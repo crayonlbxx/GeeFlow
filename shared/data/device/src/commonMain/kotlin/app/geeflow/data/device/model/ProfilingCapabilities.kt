@@ -104,5 +104,9 @@ fun BrewProfile.requiredMetrics(): Set<BrewMetric> = buildSet {
     (program as? BrewProgram.Phases)?.phases?.forEach { phase ->
         addAll(phase.exitConditions.map { it.metric }.filter { it != BrewMetric.PhaseTime })
         if (phase.ramp.style != RampStyle.Instant) phase.control.metric()?.let { add(it) }
+        if (phase.adaptiveFlowProbe != null) {
+            add(BrewMetric.PumpPressure)
+            add(BrewMetric.PumpFlow)
+        }
     }
 }

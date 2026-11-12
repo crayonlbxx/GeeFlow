@@ -3,6 +3,7 @@ package app.geeflow.presentation.feature.device.dashboard.main
 import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.brew.model.PhaseTransition
 import app.geeflow.data.device.model.DeviceError
+import app.geeflow.data.user.model.FlowChartRange
 import app.geeflow.presentation.feature.device.dashboard.components.BrewButtonState
 import app.geeflow.presentation.feature.device.dashboard.model.ChartData
 
@@ -14,9 +15,13 @@ data class DeviceDashboardViewState(
     val visibleCharts: Set<DashboardChartType> = setOf(
         DashboardChartType.Pressure,
         DashboardChartType.FlowRate,
-        DashboardChartType.WeightRate,
     ),
+    val flowChartRange: FlowChartRange = FlowChartRange.FOUR,
     val hotWaterSupported: Boolean = false,
+    val manualCyclesExcludedFromCharts: Boolean = true,
+    val flushDurationSeconds: Int = 0,
+    val flushPressure: String = "",
+    val flushElapsedSeconds: Int = 0,
     val brewButtonState: BrewButtonState = BrewButtonState.Idle,
 ) {
     enum class DashboardChartType {
@@ -46,11 +51,14 @@ data class DeviceDashboardViewState(
         val phaseProgram: BrewProgram? = null,
         val phaseTransitions: List<PhaseTransition> = emptyList(),
         val historyTarget: Map<Float, ChartData>? = null,
+        /** Weight stop target used by this shot, retained for its stopped/history readout. */
+        val historyStopWeightGrams: Float? = null,
     )
 
     data class Device(
         val id: Long = 0L,
         val name: String = "",
+        val isDemo: Boolean = false,
         val brewBoilerTemp: String? = null,
         val steamBoilerTemp: String? = null,
         val pressure: String? = null,
@@ -58,7 +66,6 @@ data class DeviceDashboardViewState(
         val brewStatus: BrewStatus = BrewStatus.Idle,
         val dispensingHotWater: Boolean = false,
         val smartScaleConnected: Boolean = false,
-        val singleDoseGrinderConnected: Boolean = false,
         val alarm: Boolean = false,
         val error: DeviceError? = null,
     ) {

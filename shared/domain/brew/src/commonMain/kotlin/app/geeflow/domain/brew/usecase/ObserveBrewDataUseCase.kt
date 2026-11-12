@@ -88,25 +88,15 @@ class ObserveBrewDataUseCase(
         if (currentlyBrewing) {
             val now = Clock.System.now()
             if (!acc.isBrewing) {
-                acc.reset(trace?.startedAt ?: state.telemetryTime ?: now, state)
+                acc.reset(state.sessionOrigin(trace, now), state)
             }
 
             acc.recorder?.capture(state)
             val elapsed = acc.startTime?.let { now - it } ?: Duration.ZERO
             val elapsedSeconds = elapsed.toDouble(DurationUnit.SECONDS).toFloat()
 
-            acc.timeInSeconds = elapsedSeconds.toInt()
-            val currentPoint = state.toDataPoint(acc.lastPoint)
-            val freshTelemetry = state.telemetryTime != acc.lastTelemetryTime
-            if (acc.lastPoint == null || freshTelemetry || currentPoint != acc.lastPoint) {
-                val sampleTime = state.telemetryTime.takeIf { freshTelemetry } ?: now
-                val sampleSeconds = acc.startTime?.let { sampleTime - it }
-                    ?.toDouble(DurationUnit.SECONDS)?.toFloat()?.coerceAtLeast(0f) ?: 0f
-                acc.data[sampleSeconds] = currentPoint
-                acc.lastSampleSeconds = sampleSeconds
-                acc.lastPoint = currentPoint
-                acc.lastTelemetryTime = state.telemetryTime
-            }
+            acc.timeInSeconds = elapsedSeconds.toInt().coerceAtLeast(0)
+            acc.captureMeasurement(state, now)
         } else {
             if (acc.isBrewing && status == DeviceState.BrewStatus.Idle) {
                 acc.lastPoint?.let { previous ->
@@ -118,6 +108,26 @@ class ObserveBrewDataUseCase(
             acc.isBrewing = false
         }
         return acc
+    }
+
+    private fun DeviceState.sessionOrigin(trace: ProfileExecutionTrace?, now: Instant) =
+        trace?.startedAt ?: statusTime ?: telemetryTime ?: now
+
+    private fun Accumulator.captureMeasurement(state: DeviceState, now: Instant) {
+        val sampleIsCurrent = state.telemetryTime?.let { it >= requireNotNull(startTime) } ?: true
+        if (!sampleIsCurrent) return
+        val currentPoint = state.toDataPoint(lastPoint)
+        val freshTelemetry = state.telemetryTime != lastTelemetryTime
+        val newMeasurement = lastPoint == null || freshTelemetry || currentPoint != lastPoint
+        if (newMeasurement) {
+            val sampleTime = state.telemetryTime.takeIf { freshTelemetry } ?: now
+            val sampleSeconds = startTime?.let { sampleTime - it }
+                ?.toDouble(DurationUnit.SECONDS)?.toFloat()?.coerceAtLeast(0f) ?: 0f
+            data[sampleSeconds] = currentPoint
+            lastSampleSeconds = sampleSeconds
+            lastPoint = currentPoint
+            lastTelemetryTime = state.telemetryTime
+        }
     }
 
     private fun DeviceState.toDataPoint(previous: BrewDataPoint?) = BrewDataPoint(

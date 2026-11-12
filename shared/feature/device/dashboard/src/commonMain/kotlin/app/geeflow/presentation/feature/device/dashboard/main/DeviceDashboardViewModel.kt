@@ -9,13 +9,14 @@ import app.geeflow.core.presentation.toUserMessage
 import app.geeflow.data.brew.model.BrewMode
 import app.geeflow.data.brew.model.BrewProfile
 import app.geeflow.data.brew.model.BrewSession
+import app.geeflow.data.brew.model.Condition
 import app.geeflow.data.device.model.DeviceCapability
 import app.geeflow.data.device.model.DeviceState
-import app.geeflow.data.device.model.DeviceState.BoilerType
 import app.geeflow.data.device.model.DeviceState.BrewStatus
 import app.geeflow.data.device.model.DeviceState.ConnectionStatus
 import app.geeflow.data.device.model.isDemo
 import app.geeflow.data.user.model.ChartType
+import app.geeflow.data.user.model.FlowChartRange
 import app.geeflow.domain.brew.usecase.GetBrewProfileUseCase
 import app.geeflow.domain.brew.usecase.ObserveBrewDataUseCase
 import app.geeflow.domain.brew.usecase.ObserveDeviceProfileUseCase
@@ -27,14 +28,15 @@ import app.geeflow.domain.device.usecase.ObserveDeviceCapabilitiesUseCase
 import app.geeflow.domain.device.usecase.ObserveDeviceStateUseCase
 import app.geeflow.domain.device.usecase.ObserveDeviceUseCase
 import app.geeflow.domain.device.usecase.RefreshAccessoriesUseCase
-import app.geeflow.domain.device.usecase.SetBoilerSettingsUseCase
 import app.geeflow.domain.device.usecase.StartHotWaterUseCase
 import app.geeflow.domain.device.usecase.StartManualBrewingUseCase
 import app.geeflow.domain.device.usecase.StartProfileBrewingUseCase
 import app.geeflow.domain.device.usecase.StopBrewingUseCase
 import app.geeflow.domain.exception.DeviceNotConnectedException
+import app.geeflow.domain.user.usecase.GetFlowChartRangeUseCase
 import app.geeflow.domain.user.usecase.GetSelectedUserUseCase
 import app.geeflow.domain.user.usecase.GetVisibleChartsUseCase
+import app.geeflow.domain.user.usecase.SetFlowChartRangeUseCase
 import app.geeflow.domain.user.usecase.ToggleChartVisibilityUseCase
 import app.geeflow.navigation.NavEvent.To
 import app.geeflow.navigation.destination.DeviceDashboard
@@ -42,7 +44,6 @@ import app.geeflow.navigation.destination.DeviceList
 import app.geeflow.navigation.destination.DeviceSettings
 import app.geeflow.navigation.destination.DeviceSettings.EntryPoint
 import app.geeflow.navigation.destination.FreeControl
-import app.geeflow.navigation.destination.UserSettings
 import app.geeflow.platform.permissions.DeniedException
 import app.geeflow.platform.permissions.PermissionBluetoothConnect
 import app.geeflow.platform.permissions.PermissionBluetoothScan
@@ -61,13 +62,15 @@ import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEve
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.DialogDismissed
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.EditProfileClicked
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.FlowControlClicked
+import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.LiveBrewTestClicked
+import app.geeflow.presentation.feature.device.dashboard.livecontrol.LiveBrewTestRoute
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.HistoryBrewSelected
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.ManualBrewClicked
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.OpenSystemSettingsClicked
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.PermissionDialogResumed
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.ProfileSelected
-import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.QuickSettingsClicked
-import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.QuickSettingsLongPressed
+import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.SettingsClicked
+import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.TemperatureClicked
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.Resumed
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.StopBrewClicked
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent.ToggleChartVisibility
@@ -82,8 +85,6 @@ import app.geeflow.presentation.feature.device.dashboard.model.toDashboard
 import app.geeflow.presentation.feature.device.dashboard.model.toTargetData
 import co.touchlab.kermit.Logger
 import geeflow.shared.feature.device.dashboard.generated.resources.Res
-import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_steam_boiler_off
-import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_steam_boiler_on
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.first
 import org.jetbrains.compose.resources.getString
@@ -111,11 +112,12 @@ internal class DeviceDashboardViewModel(
     private val observeDeviceProfile: ObserveDeviceProfileUseCase,
     private val getVisibleCharts: GetVisibleChartsUseCase,
     private val toggleChartVisibility: ToggleChartVisibilityUseCase,
+    private val getFlowChartRange: GetFlowChartRangeUseCase,
+    private val setFlowChartRange: SetFlowChartRangeUseCase,
     private val getBrewProfileUseCase: GetBrewProfileUseCase,
     private val getSelectedUser: GetSelectedUserUseCase,
     private val saveBrewToHistory: SaveBrewToHistoryUseCase,
     private val observeDeviceBrewingSettings: ObserveDeviceBrewingSettingsUseCase,
-    private val setBoilerSettings: SetBoilerSettingsUseCase,
 ) : BaseViewModel<DeviceDashboardViewState, DeviceDashboardViewModelEvent>(DeviceDashboardViewState()) {
 
     private var selectedProfileId: String? = null
@@ -123,7 +125,6 @@ internal class DeviceDashboardViewModel(
     private var selectedProfileDescription: String? = null
     private var machine: Machine? = null
     private var machineBusy = false
-    private var deviceConfig: DeviceState.Config? = null
     private var brewInProgress = false
     private var pendingAppProfile: BrewProfile? = null
     private var activeBrewProfile: BrewProfile? = null
@@ -135,7 +136,13 @@ internal class DeviceDashboardViewModel(
                 machine = it
                 it?.let {
                     modify {
-                        copy(device = device.copy(id = args.deviceId, name = machine?.name ?: args.deviceId.toString()))
+                        copy(
+                            device = device.copy(
+                                id = args.deviceId,
+                                name = machine?.name ?: args.deviceId.toString(),
+                                isDemo = machine?.isDemo == true,
+                            ),
+                        )
                     }
                 }
             }
@@ -146,24 +153,31 @@ internal class DeviceDashboardViewModel(
             }.collect { (state, hotWaterSupported) -> updateMachineStateUi(state, hotWaterSupported) }
         }
         launch { getVisibleCharts().collect(::chartsVisibilityChanged) }
+        launch { getFlowChartRange().collect(::flowChartRangeChanged) }
         launch { observeBrewData(args.deviceId).collect(::brewSessionDataChanged) }
         launch { getSelectedUser().collect { u -> modify { copy(user = user.copy(photoFileName = u?.photoUri)) } } }
-        launch { observeDeviceBrewingSettings(args.deviceId).collect { skipManualBrews = it.treatManualAsFlush } }
+        launch {
+            observeDeviceBrewingSettings(args.deviceId).collect { settings ->
+                skipManualBrews = settings.treatManualAsFlush
+                modify { copy(manualCyclesExcludedFromCharts = settings.treatManualAsFlush) }
+            }
+        }
     }
 
     @Suppress("CyclomaticComplexMethod")
     fun handleEvent(event: DeviceDashboardEvent) = when (event) {
         is ToggleChartVisibility -> launch { toggleChartVisibility(event.type.toDomain()) }
+        is DeviceDashboardEvent.FlowChartRangeSelected -> launch { setFlowChartRange(event.range) }
         is ConnectionButtonClicked -> toggleConnection()
         is DeviceClicked -> navigate(To(DeviceList))
-        is QuickSettingsClicked -> withDeviceConnected { navigate(To(QuickSettings(args.deviceId))) }
-        is QuickSettingsLongPressed -> withDeviceConnected { toggleSteamBoiler() }
-        is UserClicked -> navigate(To(UserSettings))
+        is TemperatureClicked -> withDeviceConnected { navigate(To(QuickSettings(args.deviceId))) }
+        is SettingsClicked, is UserClicked -> navigate(To(DeviceSettings(args.deviceId)))
         is ConnectedDevicesClicked -> withDeviceConnected {
             navigate(To(DeviceSettings(args.deviceId, EntryPoint.Connectivity)))
         }
 
         is CleaningClicked -> withDeviceConnected { navigate(To(QuickMaintenance(args.deviceId))) }
+        is LiveBrewTestClicked -> navigate(To(LiveBrewTestRoute(args.deviceId)))
         is DeviceDashboardEvent.MaintenanceReminderOpened -> withDeviceConnected {
             navigate(To(QuickMaintenance(args.deviceId, event.type)))
         }
@@ -179,7 +193,18 @@ internal class DeviceDashboardViewModel(
         is ManualBrewClicked -> launchCatching(::onError) { startManualBrewing(args.deviceId) }
         is StopBrewClicked -> launchCatching(::onError) { stopBrewing(args.deviceId) }
         is FlowControlClicked -> navigate(To(FreeControl(args.deviceId)))
-        is BrewClicked -> startProfile()
+        is BrewClicked -> startProfile(event.targetWeightGrams)
+        is DeviceDashboardEvent.LiveRecipeSelected -> modify {
+            copy(
+                brew = brew.copy(
+                    name = event.name,
+                    description = event.description,
+                    historyTarget = null,
+                    historyStopWeightGrams = null,
+                    phaseProgram = null,
+                ),
+            )
+        }
         is PermissionDialogResumed -> withBluetoothPermissions { modify { copy(dialog = null) } }
         is ProfileSelected -> onProfileSelected(event.id)
         is HistoryBrewSelected -> modify {
@@ -189,6 +214,7 @@ internal class DeviceDashboardViewModel(
                     time = event.durationSeconds,
                     data = event.data,
                     historyTarget = event.targetData,
+                    historyStopWeightGrams = event.targetWeightGrams,
                     phaseProgram = event.phaseProgram,
                     phaseTransitions = event.phaseTransitions,
                 ),
@@ -228,7 +254,7 @@ internal class DeviceDashboardViewModel(
         navigate(To(ProfileEditor(args.deviceId, profileId)))
     }
 
-    private fun startProfile() = launchCatching(::onError) {
+    private fun startProfile(targetWeightGrams: Float?) = launchCatching(::onError) {
         selectedProfileId
             ?.toLongOrNull()
             ?.let { getBrewProfileUseCase(it) }
@@ -236,8 +262,13 @@ internal class DeviceDashboardViewModel(
                 var started = false
                 try {
                     modify { copy(brewButtonState = BrewButtonState.Syncing) }
-                    pendingAppProfile = profile
-                    startProfileBrewing(args.deviceId, profile)
+                    val shotProfile = if (targetWeightGrams != null && profile.finishCondition is app.geeflow.data.brew.model.Condition.Weight) {
+                        profile.copy(finishCondition = app.geeflow.data.brew.model.Condition.Weight(targetWeightGrams))
+                    } else {
+                        profile
+                    }
+                    pendingAppProfile = shotProfile
+                    startProfileBrewing(args.deviceId, shotProfile)
                     started = true
                 } finally {
                     if (!started) pendingAppProfile = null
@@ -272,7 +303,6 @@ internal class DeviceDashboardViewModel(
     }
 
     private fun updateMachineStateUi(state: DeviceState, hotWaterSupported: Boolean) {
-        deviceConfig = state.config
         machineBusy = state.brewStatus == BrewStatus.Cleaning ||
             (state.brewStatus == BrewStatus.WaterFlow && !hotWaterSupported)
         modify {
@@ -309,36 +339,14 @@ internal class DeviceDashboardViewModel(
                     brewStatus = newBrewStatus,
                     dispensingHotWater = state.brewStatus == BrewStatus.WaterFlow,
                     smartScaleConnected = state.smartScale?.isConnected == true,
-                    singleDoseGrinderConnected = state.singleDoseGrinder?.isConnected == true,
                     alarm = state.hasError,
                     error = state.error,
                 ),
+                flushDurationSeconds = state.config?.manualBrewTimeSec?.toInt() ?: 0,
+                flushPressure = state.config?.manualBrewPressure?.roundDecimalsTo(1)?.toString().orEmpty(),
                 hotWaterSupported = hotWaterSupported,
                 brewButtonState = currentButtonState,
             )
-        }
-    }
-
-    /**
-     * Keeps the machine's own target temperature — the long press is a power toggle, not a way to
-     * change how hot the steam boiler runs.
-     */
-    private fun toggleSteamBoiler() {
-        val config = deviceConfig ?: return
-        val enabled = !config.steamBoilerEnabled
-        launchCatching(::onError) {
-            setBoilerSettings(
-                deviceId = args.deviceId,
-                boilerType = BoilerType.Steam,
-                enabled = enabled,
-                temp = config.targetSteamTemp.toInt(),
-            )
-            val message = if (enabled) {
-                Res.string.device_dashboard_steam_boiler_on
-            } else {
-                Res.string.device_dashboard_steam_boiler_off
-            }
-            emitEvent(DeviceDashboardViewModelEvent.ShowSnackbar(getString(message)))
         }
     }
 
@@ -346,7 +354,10 @@ internal class DeviceDashboardViewModel(
         val wasBrewing = brewInProgress
         brewInProgress = session.inProgress
 
-        if (session.mode == BrewMode.Manual && skipManualBrews) return
+        if (session.mode == BrewMode.Manual) {
+            modify { copy(flushElapsedSeconds = session.elapsedSeconds) }
+            if (skipManualBrews) return
+        }
 
         if (!wasBrewing && session.inProgress) {
             selectBrewSessionProfile(session)
@@ -368,6 +379,11 @@ internal class DeviceDashboardViewModel(
                     historyTarget = session.executionTrace?.let { trace ->
                         if (session.inProgress) trace.profile.program.toTargetData(trace.transitions) else trace.toTargetData()
                     } ?: brew.historyTarget,
+                    historyStopWeightGrams = (
+                        session.executionTrace?.profile?.finishCondition as? Condition.Weight
+                    )?.target
+                        ?: (activeBrewProfile?.finishCondition as? Condition.Weight)?.target
+                        ?: brew.historyStopWeightGrams,
                     phaseProgram = session.executionTrace?.profile?.program,
                     phaseTransitions = session.executionTrace?.transitions.orEmpty(),
                 ),
@@ -409,6 +425,10 @@ internal class DeviceDashboardViewModel(
 
     private fun chartsVisibilityChanged(charts: Set<ChartType>) = modify {
         copy(visibleCharts = charts.toDashboard())
+    }
+
+    private fun flowChartRangeChanged(range: FlowChartRange) = modify {
+        copy(flowChartRange = range)
     }
 
     private fun withBluetoothPermissions(block: suspend () -> Unit) = launch {
