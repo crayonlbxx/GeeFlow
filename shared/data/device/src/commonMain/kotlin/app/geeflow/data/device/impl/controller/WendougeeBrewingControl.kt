@@ -52,16 +52,42 @@ internal class WendougeeBrewingControl(private val owner: WendougeeController) :
         }
     }
 
-    override suspend fun stopFreeVariableBrewing() = brewOperationMutex.withLock {
+    override suspend fun setFreeVariableBrewingMode(mode: FreeHandControlMode) = brewOperationMutex.withLock {
+        val isFlow = mode == FreeHandControlMode.Flow
+        check(owner.profilingCapabilities.liveModeSwitch) {
+            "Live pressure/flow switching is not supported by this model"
+        }
+        require(!isFlow || owner.profilingCapabilities.liveFlow != null) {
+            "Flow control is not supported by this model"
+        }
         val active = requireSession()
-        // The brew command toggles a coil. Refresh status before every attempt to avoid restarting an idle machine.
         refreshBrewStatus(active)
-        if (deviceState.value.brewStatus == BrewStatus.FreeVariable) {
-            owner.updateState { it.copy(freeHandStopRequested = true) }
-            Logger.withTag(TAG).i { "Stopping free variable brew..." }
-            active.modbus.writeMultipleRegisters(WendougeeRegisters.FREE_VAR_TARGET_BASE, listOf(0, 0))
-            sendModbusPulse(COIL_FREE_VAR_BREW, "Free Variable Brew Stop")
-            refreshBrewStatus(active)
+        check(deviceState.value.brewStatus == BrewStatus.FreeVariable) {
+            "Free variable brew is not active"
+        }
+        active.modbus.writeSingleRegister(WendougeeRegisters.FREE_VAR_MODE, if (isFlow) 1 else 0)
+        owner.updateState {
+            it.copy(freeHandControlMode = if (isFlow) FreeHandControlMode.Flow else FreeHandControlMode.Pressure)
+        }
+    }
+
+    override suspend fun stopFreeVariableBrewing() {
+        owner.requestStopPriority()
+        try {
+            brewOperationMutex.withLock {
+                val active = requireSession()
+                // The brew command toggles a coil. Refresh status before every attempt to avoid restarting an idle machine.
+                refreshBrewStatus(active)
+                if (deviceState.value.brewStatus == BrewStatus.FreeVariable) {
+                    owner.updateState { it.copy(freeHandStopRequested = true) }
+                    Logger.withTag(TAG).i { "Stopping free variable brew..." }
+                    active.modbus.writeMultipleRegisters(WendougeeRegisters.FREE_VAR_TARGET_BASE, listOf(0, 0))
+                    sendModbusPulse(COIL_FREE_VAR_BREW, "Free Variable Brew Stop")
+                    refreshBrewStatus(active)
+                }
+            }
+        } finally {
+            owner.clearStopPriority()
         }
     }
 

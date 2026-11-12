@@ -5,13 +5,14 @@ import app.geeflow.data.brew.model.PhaseTransition
 import app.geeflow.presentation.feature.device.dashboard.model.ChartData
 
 sealed interface ProfileListViewModelEvent {
-    data class SelectProfile(val id: String?) : ProfileListViewModelEvent
+    data class SelectProfile(val id: String?, val navigateToBrewPage: Boolean = false) : ProfileListViewModelEvent
     data class ShowHistoryBrew(
         val name: String,
         val durationSeconds: Int,
         val data: Map<Float, ChartData>,
         /** Target curve of the profile this brew ran, empty for manual and freehand brews. */
         val targetData: Map<Float, ChartData>,
+        val targetWeightGrams: Float? = null,
         val phaseProgram: BrewProgram? = null,
         val phaseTransitions: List<PhaseTransition> = emptyList(),
     ) : ProfileListViewModelEvent

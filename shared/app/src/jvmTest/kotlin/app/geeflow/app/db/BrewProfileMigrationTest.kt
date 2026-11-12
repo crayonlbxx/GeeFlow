@@ -8,6 +8,33 @@ import kotlin.test.assertEquals
 class BrewProfileMigrationTest {
 
     @Test
+    fun `when version four database migrates then pending profile deletions are retained`() {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        driver.use { driver ->
+            driver.execute(null, "CREATE TABLE users (id INTEGER PRIMARY KEY)", 0)
+
+            AppDatabase.Schema.migrate(driver, oldVersion = 4, newVersion = 5)
+            driver.execute(null, "INSERT INTO users (id) VALUES (7)", 0)
+            driver.execute(
+                null,
+                "INSERT INTO pending_brew_profile_deletions (userId, profileId) VALUES (7, 42)",
+                0,
+            )
+            val profileId = driver.executeQuery(
+                null,
+                "SELECT profileId FROM pending_brew_profile_deletions WHERE userId = 7",
+                { cursor ->
+                    cursor.next()
+                    QueryResult.Value(cursor.getLong(0))
+                },
+                0,
+            ).value
+
+            assertEquals(42L, profileId)
+        }
+    }
+
+    @Test
     fun `when version one profiles migrate then Single Dose settings receive defaults`() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         driver.use { driver ->
@@ -72,6 +99,28 @@ class BrewProfileMigrationTest {
                 ),
                 devices,
             )
+        }
+    }
+
+    @Test
+    fun `when version three users migrate then the profile seed ledger is created`() {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        driver.use { driver ->
+            driver.execute(null, "CREATE TABLE users (id INTEGER PRIMARY KEY)", 0)
+            driver.execute(null, "INSERT INTO users (id) VALUES (1)", 0)
+
+            AppDatabase.Schema.migrate(driver, oldVersion = 3, newVersion = 4)
+
+            val tableExists = driver.executeQuery(
+                null,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'default_profile_seeds'",
+                { cursor ->
+                    cursor.next()
+                    QueryResult.Value(cursor.getLong(0))
+                },
+                0,
+            ).value
+            assertEquals(1L, tableExists)
         }
     }
 }

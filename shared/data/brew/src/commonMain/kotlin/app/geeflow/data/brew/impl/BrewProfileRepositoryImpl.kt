@@ -26,13 +26,44 @@ class BrewProfileRepositoryImpl(
         refresh()
     }
 
+    override fun upsertSynchronizedProfile(brewProfile: BrewProfile): BrewProfile {
+        val localId = brewsDao.insertBrewProfile(brewProfile)
+        refresh()
+        return brewProfile.copy(id = localId)
+    }
+
+    override fun removeSynchronizedProfile(id: Long) {
+        brewsDao.deleteBrewProfile(id)
+        refresh()
+    }
+
+    override fun pendingSyncDeletions(userId: Long): List<Long> = brewsDao.getPendingDeletions(userId)
+
+    override fun clearPendingSyncDeletions(userId: Long, profileIds: Set<Long>) {
+        brewsDao.clearPendingDeletions(userId, profileIds)
+    }
+
     override fun getBrewProfilesForUser(userId: Long): List<BrewProfile> =
         brewsDao.getBrewProfilesByUserId(userId)
 
     override fun seedDefaultProfilesIfEmpty(userId: Long) {
-        if (brewsDao.getBrewProfilesByUserId(userId).isEmpty()) {
+        if (brewsDao.hasDefaultProfileSeed(userId, SCALE_FREE_STARTERS_SEED)) return
+        val existing = brewsDao.getBrewProfilesByUserId(userId)
+        if (existing.isEmpty()) {
             addDefaultProfiles(userId)
+        } else {
+            val existingNames = existing.mapTo(mutableSetOf()) { it.name }
+            val missingStarters = defaultBrewProfileProvider.getScaleFreeStarterProfiles(userId)
+                .filterNot { it.name in existingNames }
+            if (missingStarters.isNotEmpty()) {
+                val firstPosition = existing.minOfOrNull { it.position } ?: 0
+                val startPosition = firstPosition - missingStarters.size
+                missingStarters.forEachIndexed { index, profile ->
+                    addBrewProfile(profile.copy(position = startPosition + index))
+                }
+            }
         }
+        brewsDao.markDefaultProfileSeeded(userId, SCALE_FREE_STARTERS_SEED)
     }
 
     override fun getBrewProfileById(id: Long): BrewProfile? = brewsDao.getBrewProfileById(id)
@@ -44,6 +75,7 @@ class BrewProfileRepositoryImpl(
     }
 
     override fun removeBrewProfile(id: Long) {
+        getBrewProfileById(id)?.let { brewsDao.recordPendingDeletion(it.userId, id) }
         brewsDao.deleteBrewProfile(id)
         refresh()
     }
@@ -57,12 +89,16 @@ class BrewProfileRepositoryImpl(
 
     override fun resetProfilesForUser(userId: Long) {
         brewsDao.getBrewProfilesByUserId(userId).forEach { profile ->
-            brewsDao.deleteBrewProfile(profile.id)
+            removeBrewProfile(profile.id)
         }
         addDefaultProfiles(userId)
     }
 
     private fun refresh() {
         _brewProfiles.value = brewsDao.getAllBrewProfiles()
+    }
+
+    private companion object {
+        const val SCALE_FREE_STARTERS_SEED = "scale-free-starters-v3"
     }
 }

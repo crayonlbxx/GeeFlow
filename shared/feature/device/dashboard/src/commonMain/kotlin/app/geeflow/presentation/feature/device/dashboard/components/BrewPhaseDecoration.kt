@@ -1,42 +1,28 @@
 package app.geeflow.presentation.feature.device.dashboard.components
 
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.outlined.Timer
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.ColorFilter
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.drawscope.CanvasDrawScope
-import androidx.compose.ui.graphics.drawscope.translate
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import androidx.compose.ui.unit.dp
-import app.geeflow.data.brew.model.BrewMetric
 import app.geeflow.presentation.feature.device.dashboard.model.ChartPhaseBoundary
-import app.geeflow.ui.icons.Flow
-import app.geeflow.ui.icons.GeeFlowIcon
-import app.geeflow.ui.icons.Pressure
-import app.geeflow.ui.icons.Volume
-import app.geeflow.ui.icons.Weight
+import app.geeflow.ui.text.ClearText
+import app.geeflow.ui.text.clearText
 import com.patrykandpatrick.vico.compose.cartesian.CartesianDrawingContext
 import com.patrykandpatrick.vico.compose.cartesian.decoration.Decoration
 import com.patrykandpatrick.vico.compose.common.Position
 import com.patrykandpatrick.vico.compose.common.component.rememberTextComponent
 
 @Composable
-internal fun brewPhaseDecoration(boundaries: List<ChartPhaseBoundary>): Decoration {
+internal fun brewPhaseDecoration(boundaries: List<ChartPhaseBoundary>, showLabels: Boolean = true): Decoration {
+    val stepLabel = clearText(ClearText.Step)
     val drawScope = remember { CanvasDrawScope() }
-    val colors = MaterialTheme.colorScheme
+    val colors = androidx.compose.material3.MaterialTheme.colorScheme
     val label = rememberTextComponent(
-        style = MaterialTheme.typography.labelSmall.copy(color = colors.onSurface),
+        style = androidx.compose.material3.MaterialTheme.typography.labelSmall.copy(color = colors.onSurface)
     )
-    val time = rememberVectorPainter(Icons.Outlined.Timer)
-    val volume = rememberVectorPainter(GeeFlowIcon.Volume)
-    val weight = rememberVectorPainter(GeeFlowIcon.Weight)
-    val flow = rememberVectorPainter(GeeFlowIcon.Flow)
-    val pressure = rememberVectorPainter(GeeFlowIcon.Pressure)
 
     return object : Decoration {
         override fun drawOverLayers(context: CartesianDrawingContext) = with(context) {
@@ -44,15 +30,14 @@ internal fun brewPhaseDecoration(boundaries: List<ChartPhaseBoundary>): Decorati
             val start = (if (isLtr) layerBounds.left else layerBounds.right) +
                 direction * layerDimensions.startPadding - scroll
 
-            val groupedBoundaries = boundaries.groupBy { it.seconds }
-
-            groupedBoundaries.forEach { (seconds, overlappingBoundaries) ->
+            val occupiedLabels = mutableListOf<ClosedFloatingPointRange<Float>>()
+            boundaries.sortedBy { it.seconds }.groupBy { it.seconds }.forEach { (seconds, overlappingBoundaries) ->
                 val x = start + direction * layerDimensions.xSpacing *
                     ((seconds - ranges.minX) / ranges.xStep).toFloat()
                 if (x < layerBounds.left - 1 || x > layerBounds.right + 1) return@forEach
 
-                overlappingBoundaries.forEachIndexed { index, boundary ->
-                    val tint = if (boundary.actual) colors.primary else colors.onSurfaceVariant.copy(alpha = 0.45f)
+                overlappingBoundaries.forEachIndexed { _, boundary ->
+                    val tint = if (boundary.actual) colors.primary else colors.outlineVariant
                     drawScope.draw(density = density, layoutDirection = layoutDirection, canvas = canvas, size = canvasSize) {
                         drawLine(
                             color = tint,
@@ -63,88 +48,56 @@ internal fun brewPhaseDecoration(boundaries: List<ChartPhaseBoundary>): Decorati
                                 null
                             } else {
                                 PathEffect.dashPathEffect(
-                                    floatArrayOf(
-                                        4.dp.toPx(),
-                                        3.dp.toPx(),
-                                    ),
+                                    floatArrayOf(3.dp.toPx(), 3.dp.toPx())
                                 )
                             },
                         )
                     }
 
-                    val offsetIndex = index - (overlappingBoundaries.size - 1) / 2f
-                    val offsetX = offsetIndex * 20.dp.pixels
-                    val centerX = (x + offsetX).coerceIn(layerBounds.left + 12.dp.pixels, layerBounds.right - 12.dp.pixels)
-
-                    var currentY = layerBounds.top + 12.dp.pixels
-
-                    boundary.stepNumber?.let { number ->
-                        if (currentY + 8.dp.pixels <= layerBounds.bottom) {
-                            drawScope.draw(
-                                density = density,
-                                layoutDirection = layoutDirection,
-                                canvas = canvas,
-                                size = canvasSize,
-                            ) {
-                                drawCircle(
-                                    color = colors.surfaceContainerHigh,
-                                    radius = 8.dp.toPx(),
-                                    center = Offset(centerX, currentY),
-                                )
-                            }
-                            label.draw(
-                                context = context,
-                                text = number.toString(),
-                                x = centerX,
-                                y = currentY,
-                                horizontalPosition = Position.Horizontal.Center,
-                                verticalPosition = Position.Vertical.Center,
-                            )
-                        }
-                        currentY += 18.dp.pixels
+                    if (!showLabels) return@forEachIndexed
+                    val phaseName = boundary.phaseLabel?.takeUnless { Regex("Step \\d+").matches(it) }
+                        ?: boundary.stepNumber?.let { "$stepLabel $it" } ?: return@forEachIndexed
+                    val visibleLabel = phaseName.take(14)
+                    val labelWidth = (visibleLabel.length * LabelCharacterWidth + LabelPadding).dp.pixels
+                    val halfWidth = labelWidth / 2
+                    if (layerBounds.width < halfWidth * 2) return@forEachIndexed
+                    val gap = LabelBoundaryGap.dp.pixels
+                    val left = when {
+                        isLtr && x + gap + labelWidth <= layerBounds.right -> x + gap
+                        isLtr -> x - gap - labelWidth
+                        x - gap - labelWidth >= layerBounds.left -> x - gap - labelWidth
+                        else -> x + gap
+                    }.coerceIn(layerBounds.left, layerBounds.right - labelWidth)
+                    val right = left + labelWidth
+                    val centerX = left + halfWidth
+                    if (occupiedLabels.any { left < it.endInclusive + LabelGap.dp.pixels && right > it.start }) {
+                        return@forEachIndexed
                     }
-
-                    boundary.conditions.forEach { condition ->
-                        if (currentY + 8.dp.pixels <= layerBounds.bottom) {
-                            val painter = when (condition.metric) {
-                                BrewMetric.PhaseTime -> time
-                                BrewMetric.PumpedVolume -> volume
-                                BrewMetric.CupWeight -> weight
-                                BrewMetric.PumpFlow -> flow
-                                BrewMetric.PumpPressure, BrewMetric.GroupPressure, BrewMetric.BoilerPressure -> pressure
-                            }
-                            val selected = condition in boundary.matchedConditions
-                            drawScope.draw(
-                                density = density,
-                                layoutDirection = layoutDirection,
-                                canvas = canvas,
-                                size = canvasSize,
-                            ) {
-                                drawCircle(
-                                    color = if (selected) colors.primary else colors.surfaceContainerHigh,
-                                    radius = 8.dp.toPx(),
-                                    center = Offset(centerX, currentY),
-                                )
-                                translate(left = centerX - 6.dp.toPx(), top = currentY - 6.dp.toPx()) {
-                                    with(painter) {
-                                        draw(
-                                            size = Size(12.dp.toPx(), 12.dp.toPx()),
-                                            colorFilter = ColorFilter.tint(
-                                                if (selected) {
-                                                    colors.onPrimary
-                                                } else {
-                                                    colors.onSurfaceVariant
-                                                },
-                                            ),
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        currentY += 18.dp.pixels
+                    occupiedLabels += left..right
+                    val y = layerBounds.top + 8.dp.pixels
+                    drawScope.draw(density = density, layoutDirection = layoutDirection, canvas = canvas, size = canvasSize) {
+                        drawRoundRect(
+                            color = if (boundary.actual) colors.primaryContainer else colors.surfaceContainerHigh,
+                            topLeft = Offset(left, y - 6.dp.toPx()),
+                            size = Size(right - left, 12.dp.toPx()),
+                            cornerRadius = androidx.compose.ui.geometry.CornerRadius(6.dp.toPx()),
+                        )
                     }
+                    label.draw(
+                        context = context,
+                        text = visibleLabel,
+                        x = centerX,
+                        y = y,
+                        horizontalPosition = Position.Horizontal.Center,
+                        verticalPosition = Position.Vertical.Center,
+                    )
                 }
             }
         }
     }
 }
+
+private const val LabelCharacterWidth = 7
+private const val LabelPadding = 8
+private const val LabelGap = 12
+private const val LabelBoundaryGap = 3

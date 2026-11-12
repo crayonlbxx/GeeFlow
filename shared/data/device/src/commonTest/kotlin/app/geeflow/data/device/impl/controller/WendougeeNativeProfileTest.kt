@@ -1,6 +1,7 @@
 package app.geeflow.data.device.impl.controller
 
 import app.geeflow.data.brew.model.BrewDataPoint
+import app.geeflow.data.brew.model.BrewMetric
 import app.geeflow.data.brew.model.BrewProfile
 import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.brew.model.Condition
@@ -8,8 +9,10 @@ import app.geeflow.data.brew.model.FreeHandControlMode
 import app.geeflow.data.brew.model.FreeHandRecording
 import app.geeflow.data.brew.model.FreeHandSample
 import app.geeflow.data.brew.model.ProfileStep
+import app.geeflow.data.brew.provider.DefaultBrewProfileProvider
 import app.geeflow.data.device.DeviceController
 import app.geeflow.data.device.DeviceProfileControl
+import app.geeflow.data.device.model.requiredMetrics
 import app.geeflow.data.device.TimedPumpProfileSupport
 import app.geeflow.data.device.assessProfile
 import app.geeflow.data.device.ble.modbus.ModbusCrcException
@@ -23,6 +26,7 @@ import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeout
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
 import kotlin.test.assertIs
 import kotlin.test.assertSame
@@ -31,6 +35,59 @@ import kotlin.test.assertTrue
 @OptIn(ExperimentalCoroutinesApi::class)
 class WendougeeNativeProfileTest {
     private val compiler = WendougeeProfileCompiler()
+
+    @Test
+    fun `scale-free starters reject unverified mixed live modes while retaining supported paths`() = runTest {
+        val demo = DemoDeviceController(backgroundScope)
+        val lita = object : DeviceController by demo {
+            override val profilingCapabilities = TimedPumpProfileSupport.capabilities
+            override val profiles = object : DeviceProfileControl by demo.profiles {
+                override fun assessNativeProfile(profile: BrewProfile) = TimedPumpProfileSupport.assessNative(profile)
+            }
+        }
+        val profiles = DefaultBrewProfileProvider().getScaleFreeStarterProfiles(userId = 1)
+        profiles.forEach { profile ->
+            assertTrue(BrewMetric.PumpedVolume in profile.requiredMetrics())
+            assertFalse(BrewMetric.CupWeight in profile.requiredMetrics())
+        }
+
+        val supports = profiles.map { profile -> profile to lita.assessProfile(profile) }
+        assertEquals(
+            listOf(
+                ProfileExecution.Native,
+                ProfileExecution.AppControlled,
+                ProfileExecution.Unsupported,
+                ProfileExecution.Native,
+                ProfileExecution.Native,
+            ),
+            supports.map { it.second.execution },
+        )
+        supports.forEach { (profile, support) ->
+            if (support.execution == ProfileExecution.Unsupported) {
+                assertTrue(support.issues.any { it.code == app.geeflow.data.device.model.ProfileIssueCode.ModeSwitch })
+            } else assertTrue(support.issues.isEmpty())
+            assertEquals(support.execution == ProfileExecution.Native, support.bindingAllowed)
+
+            if (support.execution == ProfileExecution.Native) {
+                val writes = compiler.buildProfileWrites(profile)
+                val nativeStages = writes.filterIsInstance<ProfileWrite.Multiple>().filter { it.values.size == 6 }
+                assertEquals(profile.steps.size, nativeStages.size)
+                val goal = (profile.finishCondition as Condition.Volume).target.toInt()
+                assertTrue(ProfileWrite.Multiple(2048, listOf(1, 1, 1, 1, goal, 0, 0)) in writes)
+            }
+        }
+    }
+
+    @Test
+    fun `when packed stage format is selected then recordings retain both legacy bank layouts`() {
+        val profile = recordingProfile()
+        val packed = WendougeeProfileCompiler(WendougeeProfileFormat.Packed)
+
+        val writes = listOf(false, true).map { packed.buildProfileWrites(profile, isBinding = it) }
+        val legacyWrites = listOf(false, true).map { compiler.buildProfileWrites(profile, isBinding = it) }
+
+        assertEquals(legacyWrites, writes)
+    }
 
     @Test
     fun `when recording contains measured weights then bank words use whole grams`() {

@@ -13,6 +13,7 @@ import app.geeflow.data.user.UserSettingsRepository
 import app.geeflow.data.user.model.AppPaletteStyle
 import app.geeflow.data.user.model.AppTheme
 import app.geeflow.data.user.model.ChartType
+import app.geeflow.data.user.model.FlowChartRange
 import app.geeflow.data.user.model.TemperatureUnit
 import app.geeflow.data.user.model.ThemeMode
 import kotlinx.coroutines.flow.Flow
@@ -28,7 +29,39 @@ class UserSettingsRepositoryImpl(
         preferences[visibleChartsKey(userId)]
             ?.mapNotNull { ChartType.entries.find { entry -> entry.name == it } }
             ?.toSet()
-            ?: setOf(ChartType.PRESSURE, ChartType.FLOW_RATE, ChartType.WEIGHT_RATE)
+            ?: setOf(ChartType.PRESSURE, ChartType.FLOW_RATE)
+    }
+
+    override fun flowChartRange(userId: Long): Flow<FlowChartRange> = dataStore.data.map { preferences ->
+        preferences[flowChartRangeKey(userId)]
+            ?.let { stored -> FlowChartRange.entries.firstOrNull { it.maxMillilitersPerSecond == stored } }
+            ?: FlowChartRange.FOUR
+    }
+
+    override fun favoriteProfiles(userId: Long): Flow<Set<String>> = dataStore.data.map {
+        it[favoriteProfilesKey(userId)].orEmpty()
+    }
+
+    override suspend fun toggleFavoriteProfile(userId: Long, profileId: String) {
+        dataStore.edit { preferences ->
+            val favorites = preferences[favoriteProfilesKey(userId)].orEmpty()
+            preferences[
+                favoriteProfilesKey(
+                    userId
+                )
+            ] = if (profileId in favorites) favorites - profileId else favorites + profileId
+        }
+    }
+
+    override suspend fun setFavoriteProfile(userId: Long, profileId: String, favorite: Boolean) {
+        dataStore.edit { preferences ->
+            val favorites = preferences[favoriteProfilesKey(userId)].orEmpty()
+            preferences[favoriteProfilesKey(userId)] = if (favorite) {
+                favorites + profileId
+            } else {
+                favorites - profileId
+            }
+        }
     }
 
     override fun darkMode(userId: Long): Flow<ThemeMode> = dataStore.data.map { preferences ->
@@ -86,6 +119,12 @@ class UserSettingsRepositoryImpl(
     override suspend fun setVisibleCharts(userId: Long, types: Set<ChartType>) {
         dataStore.edit { preferences ->
             preferences[visibleChartsKey(userId)] = types.map { it.name }.toSet()
+        }
+    }
+
+    override suspend fun setFlowChartRange(userId: Long, range: FlowChartRange) {
+        dataStore.edit { preferences ->
+            preferences[flowChartRangeKey(userId)] = range.maxMillilitersPerSecond
         }
     }
 
@@ -158,6 +197,8 @@ class UserSettingsRepositoryImpl(
     override suspend fun clearUserSettings(userId: Long) {
         dataStore.edit { preferences ->
             preferences.remove(visibleChartsKey(userId))
+            preferences.remove(flowChartRangeKey(userId))
+            preferences.remove(favoriteProfilesKey(userId))
             preferences.remove(darkModeKey(userId))
             preferences.remove(appThemeKey(userId))
             preferences.remove(fullScreenModeKey(userId))
@@ -175,6 +216,8 @@ class UserSettingsRepositoryImpl(
     private fun key(name: String, userId: Long) = "${name}_$userId"
 
     private fun visibleChartsKey(userId: Long) = stringSetPreferencesKey(key("visible_charts", userId))
+    private fun favoriteProfilesKey(userId: Long) = stringSetPreferencesKey(key("favorite_profiles", userId))
+    private fun flowChartRangeKey(userId: Long) = intPreferencesKey(key("flow_chart_range", userId))
     private fun darkModeKey(userId: Long) = stringPreferencesKey(key("dark_mode", userId))
     private fun appThemeKey(userId: Long) = stringPreferencesKey(key("app_theme", userId))
     private fun paletteStyleKey(userId: Long) = stringPreferencesKey(key("palette_style", userId))

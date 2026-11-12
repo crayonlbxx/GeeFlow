@@ -67,12 +67,15 @@ class ProfileExecutionCoordinator(
 ) {
     private val mutex = Mutex()
     private var job: Job? = null
+    private var externalOwnerDeviceId: Long? = null
     private val mutableState = MutableStateFlow(ProfileRunState())
     val state: StateFlow<ProfileRunState> = mutableState.asStateFlow()
     private val foreground = MutableStateFlow(true)
 
     suspend fun start(deviceId: Long, profile: BrewProfile) = mutex.withLock {
-        if (job?.isActive == true || state.value.stopPending) throw MachineBusyException(deviceId)
+        if (job?.isActive == true || state.value.stopPending || externalOwnerDeviceId != null) {
+            throw MachineBusyException(deviceId)
+        }
         val controller = provider.getController(deviceId)
         controller.requireReady(deviceId)
         if (controller.deviceState.value.brewStatus != DeviceState.BrewStatus.Idle) {
@@ -113,12 +116,27 @@ class ProfileExecutionCoordinator(
     }
 
     fun checkUnowned(deviceId: Long) {
-        if (state.value.active || state.value.stopPending) throw MachineBusyException(deviceId)
+        if (state.value.active || state.value.stopPending || externalOwnerDeviceId == deviceId) {
+            throw MachineBusyException(deviceId)
+        }
     }
 
     suspend fun <T> withUnownedControl(deviceId: Long, action: suspend () -> T): T = mutex.withLock {
         checkUnowned(deviceId)
         action()
+    }
+
+    /** Reserve the normal machine command path for another attended controller. */
+    suspend fun beginExternalControl(deviceId: Long) = mutex.withLock {
+        if (job?.isActive == true || state.value.stopPending || externalOwnerDeviceId != null) {
+            throw MachineBusyException(deviceId)
+        }
+        externalOwnerDeviceId = deviceId
+    }
+
+    /** Release ownership only after the external controller confirms the machine is idle. */
+    suspend fun endExternalControl(deviceId: Long) = mutex.withLock {
+        if (externalOwnerDeviceId == deviceId) externalOwnerDeviceId = null
     }
 
     private suspend fun run(

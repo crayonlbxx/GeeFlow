@@ -1,20 +1,22 @@
 package app.geeflow.presentation.feature.device.dashboard.components
 
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.SettingsSuggest
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.WaterDrop
 import androidx.compose.material.icons.outlined.WaterDrop
 import androidx.compose.material3.Icon
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardEvent
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardViewState
-import app.geeflow.ui.icons.FlowControl
-import app.geeflow.ui.icons.Flush
-import app.geeflow.ui.icons.GeeFlowIcon
+import app.geeflow.ui.text.ClearText
+import app.geeflow.ui.text.clearText
 import geeflow.shared.core.ui.generated.resources.Res
-import geeflow.shared.core.ui.generated.resources.common_flush
 import geeflow.shared.core.ui.generated.resources.common_hot_water
-import geeflow.shared.feature.device.dashboard.generated.resources.free_control_screen_title
+import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_manual_control
 import org.jetbrains.compose.resources.stringResource
 import geeflow.shared.feature.device.dashboard.generated.resources.Res as DashboardRes
 
@@ -23,22 +25,30 @@ internal fun DashboardBrewButton(
     viewState: DeviceDashboardViewState,
     onEvent: (DeviceDashboardEvent) -> Unit,
     modifier: Modifier = Modifier,
+    targetWeightGrams: Float? = null,
+    onStartLiveRecipe: (() -> Unit)? = null,
+    startEnabled: Boolean = true,
 ) {
+    val flushLabel = if (viewState.flushDurationSeconds > 0) {
+        clearText(ClearText.FlushTimed, viewState.flushDurationSeconds)
+    } else {
+        clearText(ClearText.FlushUntimed)
+    }
     val actions = buildList {
         add(
             BrewButtonAction(
-                contentDescription = stringResource(Res.string.common_flush),
+                contentDescription = flushLabel,
                 onClick = { onEvent(DeviceDashboardEvent.ManualBrewClicked) },
             ) {
-                Icon(rememberVectorPainter(GeeFlowIcon.Flush), contentDescription = null)
+                Icon(Icons.Filled.WaterDrop, contentDescription = null)
             },
         )
         add(
             BrewButtonAction(
-                contentDescription = stringResource(DashboardRes.string.free_control_screen_title),
+                contentDescription = stringResource(DashboardRes.string.device_dashboard_manual_control),
                 onClick = { onEvent(DeviceDashboardEvent.FlowControlClicked) },
             ) {
-                Icon(rememberVectorPainter(GeeFlowIcon.FlowControl), contentDescription = null)
+                Icon(Icons.Filled.SettingsSuggest, contentDescription = null)
             },
         )
         if (viewState.hotWaterSupported) {
@@ -54,9 +64,20 @@ internal fun DashboardBrewButton(
     }
     BrewButton(
         state = viewState.brewButtonState,
+        startEnabled = startEnabled,
+        stopContentDescription = if (viewState.device.brewStatus == DeviceDashboardViewState.Device.BrewStatus.Manual) {
+            clearText(ClearText.StopFlush)
+        } else {
+            clearText(ClearText.StopBrew)
+        },
         sideActions = actions,
-        onHeroButtonClick = { onEvent(DeviceDashboardEvent.BrewClicked) },
+        onHeroButtonClick = {
+            if (onStartLiveRecipe != null) onStartLiveRecipe()
+            else onEvent(DeviceDashboardEvent.BrewClicked(targetWeightGrams))
+        },
         onStopClick = { onEvent(DeviceDashboardEvent.StopBrewClicked) },
-        modifier = modifier,
+        modifier = modifier.fillMaxWidth(),
+        heroIcon = { Icon(Icons.Filled.PlayArrow, contentDescription = null) },
+        stopIcon = { Icon(Icons.Filled.Stop, contentDescription = null) },
     )
 }

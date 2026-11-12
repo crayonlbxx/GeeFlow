@@ -28,6 +28,15 @@ data class BrewPhase(
     /** PhaseTime thresholds use seconds. */
     val exitConditions: List<ExitCondition> = emptyList(),
     val conditionOperator: ConditionOperator = ConditionOperator.Or,
+    val adaptiveFlowProbe: AdaptiveFlowProbe? = null,
+)
+
+/** Probe a rising flow target, then hold the fastest measured flow below a pressure ceiling. */
+@Serializable
+data class AdaptiveFlowProbe(
+    val samplingDurationMillis: Long,
+    val pressureCeilingBar: Float,
+    val flowBackoffMillilitresPerSecond: Float = 0.1f,
 )
 
 @Serializable
@@ -57,7 +66,7 @@ sealed interface PhaseControl {
     PhaseTime
 }
 
-@Serializable enum class ThresholdComparison { Above, Below }
+@Serializable enum class ThresholdComparison { Above, Below, StrictlyAbove, StrictlyBelow }
 
 @Serializable
 data class ExitCondition(
@@ -117,6 +126,16 @@ fun BrewProgram.validate() {
                 require(phase.maximumDurationMillis > 0 && phase.minimumDurationMillis in 0..phase.maximumDurationMillis)
                 require(phase.ramp.durationMillis in 0..phase.maximumDurationMillis)
                 require(phase.control != PhaseControl.PumpPause || phase.ramp.style == RampStyle.Instant)
+                phase.adaptiveFlowProbe?.let { probe ->
+                    require(phase.control is PhaseControl.Flow)
+                    require(probe.samplingDurationMillis in 1..phase.maximumDurationMillis)
+                    require(phase.ramp.style != RampStyle.Instant && phase.ramp.durationMillis >= probe.samplingDurationMillis)
+                    require(probe.pressureCeilingBar.isFinite() && probe.pressureCeilingBar > 0f)
+                    require(
+                        probe.flowBackoffMillilitresPerSecond.isFinite() &&
+                            probe.flowBackoffMillilitresPerSecond >= 0f,
+                    )
+                }
                 val value = when (val control = phase.control) {
                     is PhaseControl.Pressure -> control.bar
                     is PhaseControl.Flow -> control.millilitresPerSecond
