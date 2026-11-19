@@ -11,7 +11,6 @@ data class ProfileListViewState(
     val history: List<HistoryBrew> = emptyList(),
     val historyLoading: Boolean = false,
     val profileLibrarySyncState: ProfileLibrarySyncState = ProfileLibrarySyncState(),
-    val profileLibraryTokenConfigured: Boolean = false,
 ) {
     data class Profile(
         val id: String,

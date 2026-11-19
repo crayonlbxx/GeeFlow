@@ -148,4 +148,21 @@ class LiveRecipeCoordinatorTest {
         assertTrue(fixture.coordinator.state.value.captureEvents.any { it.type == "command_failed" })
         coVerify(exactly = 1) { fixture.session.stop() }
     }
+
+    @Test fun disconnectSimulationRecordsAutonomousStopBeforeInterventionAndReconnect() = runTest {
+        val fixture = Fixture(backgroundScope)
+        fixture.coordinator.startDisconnectSimulation(1, "native_profile")
+        assertTrue(fixture.coordinator.state.value.stopPending)
+
+        fixture.coordinator.recordDisconnectTrialStep("autonomous_pump_stop_observed")
+        val autonomous = fixture.coordinator.state.value.captureEvents.last { it.type == "autonomous_pump_stop_observed" }
+        assertEquals("true", autonomous.fields["before_intervention"])
+        assertEquals("true", autonomous.fields["before_reconnect_stop_command"])
+
+        fixture.coordinator.recordDisconnectTrialStep("simulated_reconnect_and_verify")
+        assertFalse(fixture.coordinator.state.value.stopPending)
+        assertTrue(fixture.coordinator.state.value.captureEvents.any { it.type == "fresh_idle_confirmation" })
+        coVerify(exactly = 0) { fixture.session.stop() }
+        coVerify(exactly = 0) { fixture.execution.endExternalControl(any()) }
+    }
 }

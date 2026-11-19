@@ -53,6 +53,10 @@
     <string name="error_generic">Oops, something went wrong. Please try again.</string>
     <string name="error_connect_device">Device is not connected</string>
     <string name="error_scale_not_connected">Smart scale is needed for profile with weight target</string>
+    <string name="error_yield_scale_missing">Connect a scale before starting with a gram yield target.</string>
+    <string name="error_yield_scale_waiting">Waiting for a fresh scale reading. Keep the scale connected and try again.</string>
+    <string name="error_yield_scale_stale">Scale data is stale. Wait for a fresh weight reading and try again.</string>
+    <string name="error_yield_scale_not_tared">Tare the scale with the empty cup in place before starting.</string>
     <string name="error_profile_binding_not_allowed">This profile requires app control and cannot be assigned to the paddle</string>
     <string name="profile_manual_stop_required">Machine stop could not be confirmed. Stop the brew manually on the machine. Reconnect to confirm its state.</string>
     <string name="error_machine_busy">The machine is busy with another brew or operation.</string>

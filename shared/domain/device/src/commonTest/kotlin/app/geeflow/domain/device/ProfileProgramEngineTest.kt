@@ -197,7 +197,7 @@ class ProfileProgramEngineTest {
             program = BrewProgram.Recording(recording),
             finishCondition = Condition.Volume(500f)
         )
-        val engine = ProfileProgramEngine(profile)
+        val engine = ProfileProgramEngine(profile, simulation = true)
         assertEquals(PhaseControl.Flow(2f), engine.tick(63000, telemetry()).target)
         assertEquals(PhaseControl.Flow(4f), engine.tick(90000, telemetry()).target)
         assertEquals("recording_timeout", engine.tick(166000, telemetry()).finish)

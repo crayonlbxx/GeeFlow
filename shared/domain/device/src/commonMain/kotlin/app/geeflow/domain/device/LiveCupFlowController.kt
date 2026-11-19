@@ -150,7 +150,10 @@ data class LiveControlSettings(
 }
 
 /** Estimates cup flow in g/s from arrival-timestamped scale weights. */
-class CupFlowEstimator(private val windowMillis: Long = 500L) {
+class CupFlowEstimator(
+    private val windowMillis: Long = 500L,
+    private val minimumWindowMillis: Long = minOf(200L, windowMillis),
+) {
     private val samples = ArrayDeque<Pair<Long, Float>>()
     private var previousWeight: Float? = null
 
@@ -167,7 +170,7 @@ class CupFlowEstimator(private val windowMillis: Long = 500L) {
         previousWeight = weightGrams
         samples.addLast(arrivalMillis to weightGrams)
         while (samples.size > 2 && arrivalMillis - samples.first().first > windowMillis) samples.removeFirst()
-        if (samples.size < 3 || arrivalMillis - samples.first().first < MIN_WINDOW_MILLIS) return null
+        if (samples.size < 3 || arrivalMillis - samples.first().first < minimumWindowMillis) return null
 
         val origin = samples.first().first
         val xs = samples.map { (it.first - origin).toDouble() / 1000.0 }
@@ -183,7 +186,6 @@ class CupFlowEstimator(private val windowMillis: Long = 500L) {
     fun reset() { samples.clear(); previousWeight = null }
 
     private companion object {
-        const val MIN_WINDOW_MILLIS = 200L
         const val MAX_WEIGHT_DROP_GRAMS = 2f
     }
 }

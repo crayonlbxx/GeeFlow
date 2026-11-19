@@ -53,6 +53,10 @@
     <string name="error_generic">出错了，请重试。</string>
     <string name="error_connect_device">设备未连接</string>
     <string name="error_scale_not_connected">带有目标重量的萃取方案需要智能秤</string>
+    <string name="error_yield_scale_missing">设置克数出液目标前，请先连接智能秤。</string>
+    <string name="error_yield_scale_waiting">正在等待智能秤的新读数。请保持连接后重试。</string>
+    <string name="error_yield_scale_stale">秤数据已过期。请等待新的重量读数后重试。</string>
+    <string name="error_yield_scale_not_tared">请在放置空杯后将秤归零，再开始萃取。</string>
     <string name="error_profile_binding_not_allowed">此萃取方案需要由应用控制，无法分配给拨杆</string>
     <string name="profile_manual_stop_required">无法确认咖啡机是否已停止。请在咖啡机上手动停止萃取，并重新连接以确认状态。</string>
     <string name="error_machine_busy">咖啡机正在进行其他萃取或操作。</string>

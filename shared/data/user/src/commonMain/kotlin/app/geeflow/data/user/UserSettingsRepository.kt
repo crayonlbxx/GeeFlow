@@ -27,6 +27,7 @@ interface UserSettingsRepository {
     fun screensaverTimeoutMinutes(userId: Long): Flow<Int>
     fun autoConnect(userId: Long): Flow<Boolean>
     fun temperatureUnit(userId: Long): Flow<TemperatureUnit>
+    fun preferredShotDoseGrams(userId: Long): Flow<Float>
     suspend fun setVisibleCharts(userId: Long, types: Set<ChartType>)
     suspend fun setFlowChartRange(userId: Long, range: FlowChartRange)
     suspend fun setDarkMode(userId: Long, mode: ThemeMode)
@@ -40,5 +41,6 @@ interface UserSettingsRepository {
     suspend fun setScreensaverTimeoutMinutes(userId: Long, minutes: Int)
     suspend fun setAutoConnect(userId: Long, enabled: Boolean)
     suspend fun setTemperatureUnit(userId: Long, unit: TemperatureUnit)
+    suspend fun setPreferredShotDoseGrams(userId: Long, doseGrams: Float)
     suspend fun clearUserSettings(userId: Long)
 }

@@ -5,6 +5,7 @@ import app.cash.sqldelight.EnumColumnAdapter
 import app.geeflow.data.brew.impl.BrewDataPointsAdapter
 import app.geeflow.data.brew.impl.BrewProfileRepositoryImpl
 import app.geeflow.data.brew.impl.BrewProgramAdapter
+import app.geeflow.data.brew.impl.BrewScaleSamplesAdapter
 import app.geeflow.data.brew.impl.BrewsDao
 import app.geeflow.data.brew.impl.ConditionAdapter
 import app.geeflow.data.brew.impl.FreeHandRecordingAdapter
@@ -102,6 +103,8 @@ class DefaultProfileSeedRepositoryTest {
                 profileRecordingAdapter = FreeHandRecordingAdapter,
                 dataPointsAdapter = BrewDataPointsAdapter,
                 executionTraceAdapter = ProfileExecutionTraceAdapter,
+                scaleSamplesAdapter = BrewScaleSamplesAdapter,
+                profileProgramAdapter = BrewProgramAdapter,
             ),
         )
         BrewDatabase.Schema.create(driver)

@@ -9,6 +9,7 @@ import app.geeflow.core.presentation.toUserMessage
 import app.geeflow.data.brew.model.BrewMetric
 import app.geeflow.data.brew.model.BrewMode
 import app.geeflow.data.brew.model.BrewProfile
+import app.geeflow.data.brew.model.withFinishConfiguration
 import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.brew.model.ExitCondition
 import app.geeflow.data.brew.model.ThresholdComparison
@@ -208,6 +209,7 @@ internal class ProfileEditorViewModel(
         modify {
             copy(
                 isRecording = profile.recording != null,
+                advancedProgram = profile.program.version == 2,
                 profileName = profile.name,
                 description = profile.description,
                 displayDescription = displayDescription,
@@ -235,7 +237,7 @@ internal class ProfileEditorViewModel(
     }
 
     private fun openStepEditor(id: Long?) {
-        if (viewState.value.isRecording) return
+        if (viewState.value.isRecording || viewState.value.advancedProgram) return
         val step = if (id == null) {
             val newId = nextStepId++
             val type = viewState.value.experimentalControlType ?: StepType.Pressure
@@ -300,7 +302,8 @@ internal class ProfileEditorViewModel(
             description = state.description,
             autoLinkOpen = sourceProfile?.autoLinkOpen ?: false,
             singleDoseSettings = state.singleDoseSettings,
-            program = sourceProfile?.recording?.let { BrewProgram.Recording(it) }
+            program = sourceProfile?.program?.takeIf { it.version == 2 }?.withFinishConfiguration(state.finishTarget.toCondition())
+                ?: sourceProfile?.recording?.let { BrewProgram.Recording(it) }
                 ?: BrewProgram.Phases(state.steps.map { it.toPhase() }),
             finishCondition = state.finishTarget.toCondition(),
         )
@@ -334,7 +337,7 @@ internal class ProfileEditorViewModel(
 
     private fun updateSteps(block: List<Step>.() -> List<Step>) {
         modify {
-            if (isRecording) return@modify this
+            if (isRecording || advancedProgram) return@modify this
             val updated = steps.block()
             copy(
                 steps = updated,

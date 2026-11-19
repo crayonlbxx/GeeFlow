@@ -39,7 +39,6 @@ internal object TimedPumpProfileSupport {
         livePressure = mapOf(PressureLocation.Pump to TargetRange(0f, MAX_PRESSURE, .1f)),
         liveFlow = TargetRange(0f, MAX_FLOW, .1f),
         livePause = true,
-        // Mode-register acknowledgement does not confirm the active regulator switched.
         liveModeSwitch = false,
         minimumWriteIntervalMillis = 100L,
         telemetry = setOf(BrewMetric.PumpPressure, BrewMetric.PumpFlow, BrewMetric.PumpedVolume, BrewMetric.CupWeight),
@@ -58,9 +57,13 @@ internal object TimedPumpProfileSupport {
     }
 
     fun assessNative(profile: BrewProfile, flowSupported: Boolean = true): List<ProfileIssue> = buildList {
+        if (profile.program.version == 2) add(ProfileIssue(ProfileIssueCode.NativeFeature))
         if (profile.finishCondition == null) add(ProfileIssue(ProfileIssueCode.MissingGlobalGoal))
         when (val program = profile.program) {
             is BrewProgram.Recording -> {
+                if (program.recording.samples.any { sample ->
+                    (if (program.recording.controlMode == FreeHandControlMode.Flow) sample.data.flowRate else sample.data.pressure) !in 0f..MAX_PRESSURE
+                }) add(ProfileIssue(ProfileIssueCode.UnsupportedControl))
                 if (!flowSupported && program.recording.controlMode == FreeHandControlMode.Flow) {
                     add(ProfileIssue(ProfileIssueCode.UnsupportedControl))
                 }

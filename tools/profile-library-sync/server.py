@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from program_validation import validate_program, fields, integer, number
 import hmac
 import json
 import os
@@ -38,10 +39,11 @@ def load_catalog() -> dict[str, Any]:
 
 
 def validate_catalog(value: Any) -> None:
-    if not isinstance(value, dict) or value.get("schemaVersion") != SCHEMA_VERSION:
+    if not isinstance(value, dict) or (type(value.get("schemaVersion")) is not int or value.get("schemaVersion") not in (1, 2)):
         raise ValueError("Unsupported catalog schema")
-    if not isinstance(value.get("revision"), int) or value["revision"] < 0:
+    if not integer(value.get("revision")) or value["revision"] < 0:
         raise ValueError("Catalog revision must be a non-negative integer")
+    fields(value,"schemaVersion revision profiles","catalog")
     records = value.get("profiles")
     if not isinstance(records, list):
         raise ValueError("Catalog profiles must be an array")
@@ -50,6 +52,7 @@ def validate_catalog(value: Any) -> None:
     for record in records:
         if not isinstance(record, dict):
             raise ValueError("Each profile record must be an object")
+        fields(record,"id revision favorite deleted profile","catalog record")
         profile_id = record.get("id")
         try:
             uuid.UUID(profile_id)
@@ -58,13 +61,14 @@ def validate_catalog(value: Any) -> None:
         if profile_id in seen:
             raise ValueError("Profile ids must be unique")
         seen.add(profile_id)
-        if not isinstance(record.get("revision"), int) or record["revision"] < 0:
+        if not integer(record.get("revision")) or record["revision"] < 0:
             raise ValueError("Profile revision must be a non-negative integer")
         if not isinstance(record.get("favorite"), bool) or not isinstance(record.get("deleted"), bool):
             raise ValueError("Profile favorite and deleted fields must be booleans")
         body = record.get("profile")
         if not isinstance(body, dict):
             raise ValueError("Profile body must be an object")
+        fields(body,"name description autoLinkOpen singleDoseSettings program finishCondition","profile")
         for key in ("name", "description", "autoLinkOpen", "singleDoseSettings", "program"):
             if key not in body:
                 raise ValueError(f"Profile body is missing {key}")
@@ -76,6 +80,19 @@ def validate_catalog(value: Any) -> None:
             raise ValueError("autoLinkOpen must be a boolean")
         if not isinstance(body["singleDoseSettings"], dict) or not isinstance(body["program"], dict):
             raise ValueError("singleDoseSettings and program must be objects")
+        dose = body['singleDoseSettings']
+        fields(dose,'enabled grindingSize grindingSpeed','single-dose settings')
+        if not isinstance(dose.get('enabled'), bool) or not integer(dose.get('grindingSize'),0,600) or not integer(dose.get('grindingSpeed'),200,1000):
+            raise ValueError('Invalid single-dose settings')
+        validate_program(body['program'])
+        if body['program'].get('version', 1) == 2 and value['schemaVersion'] != 2:
+            raise ValueError('Program v2 requires catalog schema v2')
+        finish = body.get('finishCondition')
+        if finish is not None:
+            if not isinstance(finish, dict): raise ValueError('Finish condition must be an object')
+            fields(finish,"type target","finish condition")
+            if finish.get('type') not in ('weight','volume') or not number(finish.get('target'), 0.0001):
+                raise ValueError('Finish target must be positive')
         if body.get("finishCondition") is not None and not isinstance(body["finishCondition"], dict):
             raise ValueError("finishCondition must be an object or null")
 
@@ -184,6 +201,9 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 return
 
+            if current['schemaVersion'] == 2 and incoming['schemaVersion'] != 2:
+                self._send_json(400, {"error": "schema_downgrade_forbidden"})
+                return
             current_ids = {record["id"] for record in current["profiles"]}
             incoming_ids = {record["id"] for record in incoming["profiles"]}
             if not current_ids.issubset(incoming_ids):

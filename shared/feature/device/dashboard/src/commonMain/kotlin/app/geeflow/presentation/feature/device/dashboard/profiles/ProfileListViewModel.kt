@@ -10,6 +10,8 @@ import app.geeflow.data.brew.model.BrewHistoryEntry
 import app.geeflow.data.brew.model.BrewMetric
 import app.geeflow.data.brew.model.BrewMode
 import app.geeflow.data.brew.model.BrewProfile
+import app.geeflow.data.brew.model.BrewScaleSample
+import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.brew.model.Condition
 import app.geeflow.data.brew.model.toProgram
 import app.geeflow.data.device.model.requiredMetrics
@@ -17,6 +19,7 @@ import app.geeflow.domain.brew.usecase.BindProfileUseCase
 import app.geeflow.domain.brew.usecase.DeleteProfileUseCase
 import app.geeflow.domain.brew.usecase.DuplicateProfileUseCase
 import app.geeflow.domain.brew.usecase.GetBrewHistoryDataUseCase
+import app.geeflow.domain.brew.usecase.GetBrewHistoryScaleSamplesUseCase
 import app.geeflow.domain.brew.usecase.GetBrewHistoryUseCase
 import app.geeflow.domain.brew.usecase.ObserveDeviceProfileUseCase
 import app.geeflow.domain.brew.usecase.ObserveUserProfilesUseCase
@@ -77,6 +80,7 @@ internal class ProfileListViewModel(
     private val updateBrewProfilesPositionsUseCase: UpdateBrewProfilesPositionsUseCase,
     private val getBrewHistoryUseCase: GetBrewHistoryUseCase,
     private val getBrewHistoryDataUseCase: GetBrewHistoryDataUseCase,
+    private val getBrewHistoryScaleSamplesUseCase: GetBrewHistoryScaleSamplesUseCase,
     private val getFavoriteProfiles: GetFavoriteProfilesUseCase,
     private val toggleFavoriteProfile: ToggleFavoriteProfileUseCase,
     private val profileLibrarySync: ProfileLibrarySyncController,
@@ -94,10 +98,6 @@ internal class ProfileListViewModel(
             profileLibrarySync.state.collect { syncState ->
                 modify { copy(profileLibrarySyncState = syncState) }
             }
-        }
-        launch {
-            val tokenConfigured = profileLibrarySync.tokenConfigured()
-            modify { copy(profileLibraryTokenConfigured = tokenConfigured) }
         }
         launch {
             getFavoriteProfiles().collect { favorites ->
@@ -129,19 +129,12 @@ internal class ProfileListViewModel(
     fun handleEvent(event: ProfileListEvent) = when (event) {
         is ProfileListEvent.OpenLiveRecipe -> navigateTo(LiveRecipeEditorRoute(args.deviceId, event.id))
         is ProfileListEvent.ToggleFavoriteClicked -> launchCatching(::onError) { toggleFavoriteProfile(event.id) }
-        is ProfileListEvent.SaveProfileLibraryToken -> launchCatching(::onError) {
-            profileLibrarySync.setToken(event.token)
-            modify { copy(profileLibraryTokenConfigured = event.token.isNotBlank()) }
-        }
-        ProfileListEvent.ClearProfileLibraryToken -> launchCatching(::onError) {
-            profileLibrarySync.setToken("")
-            modify { copy(profileLibraryTokenConfigured = false) }
-        }
         ProfileListEvent.SyncProfileLibraryNow -> launch { profileLibrarySync.syncNow() }
         is ProfileSelected -> setSelectedProfileId(event.id)
         is ProfileListEvent.ProfilePreviewSelected -> setSelectedProfileId(event.id, navigateToBrewPage = false)
         is HistoryClicked -> toggleHistory()
         is HistoryBrewSelected -> showHistoryBrew(event.id)
+        is ProfileListEvent.HistoryGrindSettingChanged -> historyGrindSettingChanged(event)
         is LoadMoreHistory -> loadMoreHistory()
         is SearchQueryChanged -> searchQueryChanged(event.query)
         is AddProfileClicked -> navigateTo(ProfileEditor(args.deviceId))
@@ -189,7 +182,7 @@ internal class ProfileListViewModel(
     }
 
     private suspend fun loadHistoryPage() {
-        val page = getBrewHistoryUseCase(searchQuery, HISTORY_PAGE_SIZE, historyEntries.size)
+        val page = getBrewHistoryUseCase.forDevice(args.deviceId, searchQuery, HISTORY_PAGE_SIZE, historyEntries.size)
         historyEndReached = page.size < HISTORY_PAGE_SIZE
         historyEntries = historyEntries + page
         val brews = page.map { it.toHistoryBrew() }
@@ -206,21 +199,44 @@ internal class ProfileListViewModel(
                 weightPerSecond = point.weightRate,
                 volume = point.volume,
                 volumePerSecond = point.flowRate,
+                temperatureC = point.brewBoilerTempC,
             )
         }
         emitEvent(
             ShowHistoryBrew(
                 name = entry.displayName(),
+                description = entry.executionTrace?.profile?.description.orEmpty(),
                 durationSeconds = entry.durationSeconds,
-                phaseProgram = entry.executionTrace?.profile?.program ?: entry.profileSteps.toProgram(),
+                phaseProgram = entry.profileProgram ?: entry.executionTrace?.profile?.program ?: entry.profileSteps.toProgram(),
                 phaseTransitions = entry.executionTrace?.transitions.orEmpty(),
                 data = data,
+                scaleSamples = getBrewHistoryScaleSamplesUseCase(entry.id),
                 targetData = entry.executionTrace?.toTargetData()
                     ?: entry.profileRecording?.toTargetData()
                     ?: entry.profileSteps.toTargetData(),
-                targetWeightGrams = (entry.executionTrace?.profile?.finishCondition as? Condition.Weight)?.target,
+                targetWeightGrams = entry.executionTrace?.stopTargetGrams
+                    ?: (entry.executionTrace?.profile?.finishCondition as? Condition.Weight)?.target
+                    ?: (entry.profileProgram as? BrewProgram.Phases)?.recipe?.settings?.targetYieldG,
+                id = entry.id,
+                startedAt = entry.startedAt,
+                endedAt = entry.endedAt,
+                doseGrams = entry.doseGrams,
+                grindSetting = entry.grindSetting,
+                extractionStartMillis = entry.extractionStartMillis,
+                extractionStartEstimated = entry.extractionStartEstimated,
+                finalWeightGrams = entry.finalWeightGrams,
+                recipeRatio = entry.recipeRatio,
+                recipeTargetGrams = entry.recipeTargetGrams,
+                recordedPhaseIds = entry.executionTrace?.targets.orEmpty().mapNotNull { it.phaseId }.toSet(),
             ),
         )
+    }
+
+    private fun historyGrindSettingChanged(event: ProfileListEvent.HistoryGrindSettingChanged) {
+        val entryId = event.id.toLongOrNull() ?: return
+        historyEntries = historyEntries.map { entry ->
+            if (entry.id == entryId) entry.copy(grindSetting = event.grindSetting) else entry
+        }
     }
 
     private suspend fun BrewHistoryEntry.toHistoryBrew() = ProfileListViewState.HistoryBrew(
@@ -280,10 +296,19 @@ internal class ProfileListViewModel(
     }
 
     private suspend fun profilesChanged(profiles: List<BrewProfile>, boundProfileId: String?) {
-        currentDomainProfiles = profiles
-        if (profiles.isEmpty()) return
-        val selectedProfileId = viewState.value.profiles.find { it.selected }?.id ?: profiles.first().id.toString()
-        val mappedProfiles = profiles.mapIndexed { index, profile ->
+        val orderedProfiles = profiles.sortedWith(
+            compareBy<BrewProfile> {
+                when (it.name.trim().lowercase()) {
+                    "adaptive v2", "adaptive v2 (lita, no scale)" -> 0
+                    "londinium" -> 1
+                    else -> 2
+                }
+            }.thenBy { it.position }.thenBy { it.name.lowercase() },
+        )
+        currentDomainProfiles = orderedProfiles
+        if (orderedProfiles.isEmpty()) return
+        val selectedProfileId = viewState.value.profiles.find { it.selected }?.id ?: orderedProfiles.first().id.toString()
+        val mappedProfiles = orderedProfiles.mapIndexed { index, profile ->
             mapToProfile(
                 index = index,
                 profile = profile,

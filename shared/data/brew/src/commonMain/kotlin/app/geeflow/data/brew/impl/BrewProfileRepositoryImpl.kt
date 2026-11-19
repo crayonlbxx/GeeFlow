@@ -47,23 +47,27 @@ class BrewProfileRepositoryImpl(
         brewsDao.getBrewProfilesByUserId(userId)
 
     override fun seedDefaultProfilesIfEmpty(userId: Long) {
-        if (brewsDao.hasDefaultProfileSeed(userId, SCALE_FREE_STARTERS_SEED)) return
+        if (brewsDao.hasDefaultProfileSeed(userId, PROFILE_SEED)) return
+
         val existing = brewsDao.getBrewProfilesByUserId(userId)
         if (existing.isEmpty()) {
             addDefaultProfiles(userId)
         } else {
+            val defaults = defaultBrewProfileProvider.getDefaultProfiles(userId)
             val existingNames = existing.mapTo(mutableSetOf()) { it.name }
-            val missingStarters = defaultBrewProfileProvider.getScaleFreeStarterProfiles(userId)
-                .filterNot { it.name in existingNames }
-            if (missingStarters.isNotEmpty()) {
-                val firstPosition = existing.minOfOrNull { it.position } ?: 0
-                val startPosition = firstPosition - missingStarters.size
-                missingStarters.forEachIndexed { index, profile ->
-                    addBrewProfile(profile.copy(position = startPosition + index))
+            existing.forEach { profile ->
+                val replacement = defaultBrewProfileProvider.standardizedDescription(profile.name, profile.description)
+                if (replacement != null) addBrewProfile(profile.copy(description = replacement))
+            }
+            if (existingNames.none { it.startsWith("Adaptive v2", ignoreCase = true) }) {
+                val adaptive = defaults.firstOrNull { it.name == ADAPTIVE_PROFILE_NAME }
+                if (adaptive != null) {
+                    val firstPosition = existing.minOfOrNull { it.position } ?: 0
+                    addBrewProfile(adaptive.copy(position = firstPosition - 1))
                 }
             }
         }
-        brewsDao.markDefaultProfileSeeded(userId, SCALE_FREE_STARTERS_SEED)
+        brewsDao.markDefaultProfileSeeded(userId, PROFILE_SEED)
     }
 
     override fun getBrewProfileById(id: Long): BrewProfile? = brewsDao.getBrewProfileById(id)
@@ -99,6 +103,7 @@ class BrewProfileRepositoryImpl(
     }
 
     private companion object {
-        const val SCALE_FREE_STARTERS_SEED = "scale-free-starters-v3"
+        const val PROFILE_SEED = "standardized-descriptions-adaptive-v1"
+        const val ADAPTIVE_PROFILE_NAME = "Adaptive v2"
     }
 }

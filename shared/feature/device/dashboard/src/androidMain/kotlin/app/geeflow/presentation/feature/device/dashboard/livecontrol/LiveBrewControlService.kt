@@ -13,6 +13,8 @@ import android.os.PowerManager
 import app.geeflow.data.device.BookooScaleConnection
 import app.geeflow.domain.device.LiveBrewTestCoordinator
 import app.geeflow.domain.device.LiveControlSettings
+import app.geeflow.domain.device.LiveModeProbePath
+import app.geeflow.domain.device.LiveModeProbeSequence
 import app.geeflow.domain.device.LiveTestRecipe
 import app.geeflow.domain.device.recipe.*
 import kotlinx.coroutines.CoroutineScope
@@ -36,6 +38,8 @@ class LiveBrewControlService : Service() {
     private var observerJob: Job? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var cleaned = false
+    private var scaleConnectedByService = false
+    private var activeProbePath = LiveModeProbePath.EncodingMatrix
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -48,12 +52,21 @@ class LiveBrewControlService : Service() {
             return START_NOT_STICKY
         }
         val scaleId = intent?.getStringExtra(EXTRA_SCALE_ID)
-        if (deviceId <= 0 || scaleId.isNullOrBlank()) {
+        val commandProbe = intent?.getBooleanExtra(EXTRA_COMMAND_PROBE, false) == true
+        val commandProbePath = LiveModeProbePath.entries.firstOrNull {
+            it.id == intent?.getStringExtra(EXTRA_COMMAND_PROBE_PATH)
+        } ?: LiveModeProbePath.EncodingMatrix
+        val commandProbeSequence = LiveModeProbeSequence.entries.firstOrNull {
+            it.id == intent?.getStringExtra(EXTRA_COMMAND_PROBE_SEQUENCE)
+        } ?: LiveModeProbeSequence.FlowPressureFlowPressure
+        activeProbePath = commandProbePath
+        if (deviceId <= 0 || !commandProbe && scaleId.isNullOrBlank()) {
             stopSelf(startId)
             return START_NOT_STICKY
         }
 
         if (controlJob?.isActive == true) return START_NOT_STICKY
+        scaleConnectedByService = false
         val recipeDocument = intent.getStringExtra(EXTRA_RECIPE_FILE)?.let { name ->
             require(name.matches(Regex("live-[a-zA-Z0-9-]+\\.json"))) { "Invalid execution snapshot name" }
             val snapshot = java.io.File(java.io.File(filesDir, "live-recipe-executions"), name)
@@ -61,33 +74,50 @@ class LiveBrewControlService : Service() {
         }
         val settings = recipeDocument?.controlSettings() ?: settingsFrom(intent)
         createNotificationChannel()
-        val initialNotification = notification("Connecting scale before machine start")
+        val initialNotification = notification(
+            if (commandProbe) "Starting ${commandProbePath.label}: ${commandProbeSequence.label}"
+            else "Checking scale before machine start",
+        )
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(NOTIFICATION_ID, initialNotification, ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else {
             startForeground(NOTIFICATION_ID, initialNotification)
         }
-        acquireBoundedWakeLock(settings.shotDeadlineMillis)
+        acquireBoundedWakeLock(if (commandProbe) 100_000L else settings.shotDeadlineMillis)
         observeCoordinator()
         controlJob?.cancel()
         controlJob = serviceScope.launch {
+            val previousRunId = coordinator().state.value.runId
             try {
-                val scale = scaleConnection()
-                scale.connect(scaleId, serviceScope)
-                withTimeout(5.seconds) { scale.state.first { it.connected && it.reading != null } }
-                coordinator().startLive(
-                    deviceId,
-                    recipeDocument?.let(LiveTestRecipe::fromDocument) ?: LiveTestRecipe.simulationDefaults(settings.basePressureBar),
-                    settings,
-                    serviceScope,
-                )
+                if (commandProbe) {
+                    coordinator().startCommandEncodingProbe(deviceId, commandProbePath, commandProbeSequence, serviceScope)
+                } else {
+                    val scale = scaleConnection()
+                    val selectedScaleId = requireNotNull(scaleId)
+                    if (!scale.state.value.connected || scale.state.value.device?.id != selectedScaleId) {
+                        scale.connect(selectedScaleId, serviceScope)
+                        scaleConnectedByService = true
+                    }
+                    withTimeout(5.seconds) {
+                        scale.state.first {
+                            it.connected && it.device?.id == selectedScaleId &&
+                                it.reading?.monotonicMark?.elapsedNow()?.inWholeMilliseconds?.let { age -> age in 0..1000 } == true
+                        }
+                    }
+                    coordinator().startLive(
+                        deviceId,
+                        recipeDocument?.let(LiveTestRecipe::fromDocument) ?: LiveTestRecipe.simulationDefaults(settings.basePressureBar),
+                        settings,
+                        serviceScope,
+                    )
+                }
                 coordinator().state.first { it.deviceId == deviceId && !it.active && !it.stopPending }
             } catch (error: Exception) {
                 updateNotification("Test ended: ${error.message ?: "control error"}")
                 delay(2.seconds)
             } finally {
                 val finalState = coordinator().state.value
-                if (finalState.captureEvents.isNotEmpty()) {
+                if (finalState.runId != null && finalState.runId != previousRunId && finalState.captureEvents.isNotEmpty()) {
                     runCatching { exportLiveTestCapture(this@LiveBrewControlService, finalState) }
                         .onSuccess(coordinator()::reportExportLocation)
                 }
@@ -110,6 +140,7 @@ class LiveBrewControlService : Service() {
                 if (state.deviceId == deviceId) {
                     val status = when {
                         state.stopPending -> "Stop requested, waiting for machine confirmation"
+                        state.active && state.mode == app.geeflow.domain.device.LiveTestMode.CommandEncodingProbe -> "${activeProbePath.label} running. Tap Stop to end the test."
                         state.active -> "Live pressure control running. Tap Stop to end the shot."
                         else -> state.message ?: "Preparing live test"
                     }
@@ -166,7 +197,7 @@ class LiveBrewControlService : Service() {
     private suspend fun finishService() {
         if (cleaned) return
         cleaned = true
-        runCatching { scaleConnection().disconnect() }
+        if (scaleConnectedByService) runCatching { scaleConnection().disconnect() }
         wakeLock?.let { if (it.isHeld) it.release() }
         wakeLock = null
         if (Build.VERSION.SDK_INT >= 24) stopForeground(STOP_FOREGROUND_REMOVE) else @Suppress("DEPRECATION") stopForeground(true)
@@ -201,5 +232,8 @@ class LiveBrewControlService : Service() {
         private const val NOTIFICATION_ID = 4702
         private const val WAKELOCK_GRACE_MILLIS = 6_000L
         const val EXTRA_RECIPE_FILE = "live_test.recipe_snapshot_file"
+        const val EXTRA_COMMAND_PROBE = "live_test.command_encoding_probe"
+        const val EXTRA_COMMAND_PROBE_PATH = "live_test.command_encoding_probe_path"
+        const val EXTRA_COMMAND_PROBE_SEQUENCE = "live_test.command_encoding_probe_sequence"
     }
 }

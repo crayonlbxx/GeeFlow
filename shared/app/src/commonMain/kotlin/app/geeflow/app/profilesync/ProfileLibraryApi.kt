@@ -22,7 +22,7 @@ import org.koin.core.annotation.Single
 @Single
 class ProfileLibraryApi {
     private val log = Logger.withTag("ProfileLibrarySync")
-    private val json = Json { ignoreUnknownKeys = true }
+    private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val client = HttpClient {
         install(ContentNegotiation) { json(json) }
         install(HttpTimeout) {

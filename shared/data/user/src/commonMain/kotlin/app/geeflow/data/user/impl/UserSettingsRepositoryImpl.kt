@@ -6,6 +6,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.booleanPreferencesKey
 import androidx.datastore.preferences.core.edit
+import androidx.datastore.preferences.core.floatPreferencesKey
 import androidx.datastore.preferences.core.intPreferencesKey
 import androidx.datastore.preferences.core.stringPreferencesKey
 import androidx.datastore.preferences.core.stringSetPreferencesKey
@@ -29,7 +30,7 @@ class UserSettingsRepositoryImpl(
         preferences[visibleChartsKey(userId)]
             ?.mapNotNull { ChartType.entries.find { entry -> entry.name == it } }
             ?.toSet()
-            ?: setOf(ChartType.PRESSURE, ChartType.FLOW_RATE)
+            ?: ChartType.entries.toSet()
     }
 
     override fun flowChartRange(userId: Long): Flow<FlowChartRange> = dataStore.data.map { preferences ->
@@ -56,11 +57,7 @@ class UserSettingsRepositoryImpl(
     override suspend fun setFavoriteProfile(userId: Long, profileId: String, favorite: Boolean) {
         dataStore.edit { preferences ->
             val favorites = preferences[favoriteProfilesKey(userId)].orEmpty()
-            preferences[favoriteProfilesKey(userId)] = if (favorite) {
-                favorites + profileId
-            } else {
-                favorites - profileId
-            }
+            preferences[favoriteProfilesKey(userId)] = if (favorite) favorites + profileId else favorites - profileId
         }
     }
 
@@ -114,6 +111,12 @@ class UserSettingsRepositoryImpl(
         preferences[temperatureUnitKey(userId)]
             ?.let { TemperatureUnit.entries.find { entry -> entry.name == it } }
             ?: TemperatureUnit.CELSIUS
+    }
+
+    override fun preferredShotDoseGrams(userId: Long): Flow<Float> = dataStore.data.map { preferences ->
+        preferences[shotDoseKey(userId)]
+            ?.takeIf { it.isFinite() && it in MIN_SHOT_DOSE_GRAMS..MAX_SHOT_DOSE_GRAMS }
+            ?: DEFAULT_SHOT_DOSE_GRAMS
     }
 
     override suspend fun setVisibleCharts(userId: Long, types: Set<ChartType>) {
@@ -194,6 +197,11 @@ class UserSettingsRepositoryImpl(
         }
     }
 
+    override suspend fun setPreferredShotDoseGrams(userId: Long, doseGrams: Float) {
+        require(doseGrams.isFinite() && doseGrams in MIN_SHOT_DOSE_GRAMS..MAX_SHOT_DOSE_GRAMS)
+        dataStore.edit { preferences -> preferences[shotDoseKey(userId)] = doseGrams }
+    }
+
     override suspend fun clearUserSettings(userId: Long) {
         dataStore.edit { preferences ->
             preferences.remove(visibleChartsKey(userId))
@@ -208,6 +216,7 @@ class UserSettingsRepositoryImpl(
             preferences.remove(screensaverTimeoutMinutesKey(userId))
             preferences.remove(autoConnectKey(userId))
             preferences.remove(temperatureUnitKey(userId))
+            preferences.remove(shotDoseKey(userId))
             preferences.remove(paletteStyleKey(userId))
             preferences.remove(customSeedColorKey(userId))
         }
@@ -230,9 +239,13 @@ class UserSettingsRepositoryImpl(
     private fun screensaverTimeoutMinutesKey(userId: Long) = intPreferencesKey(key("screensaver_timeout_minutes", userId))
     private fun autoConnectKey(userId: Long) = booleanPreferencesKey(key("auto_connect", userId))
     private fun temperatureUnitKey(userId: Long) = stringPreferencesKey(key("temperature_unit", userId))
+    private fun shotDoseKey(userId: Long) = floatPreferencesKey(key("shot_dose_grams", userId))
 
     companion object {
         private const val DefaultCustomSeedColor = 0xFF1E88E5.toInt()
         private const val DefaultScreensaverTimeoutMinutes = 5
+        private const val DEFAULT_SHOT_DOSE_GRAMS = 18f
+        private const val MIN_SHOT_DOSE_GRAMS = 0.1f
+        private const val MAX_SHOT_DOSE_GRAMS = 100f
     }
 }

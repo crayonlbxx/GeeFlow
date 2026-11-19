@@ -1,94 +1,70 @@
 package app.geeflow.data.brew.provider
 
+import app.geeflow.data.brew.model.BrewMetric
 import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.brew.model.Condition
 import app.geeflow.data.brew.model.PhaseControl
+import app.geeflow.data.brew.model.ThresholdComparison
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertIs
+import kotlin.test.assertFalse
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class DefaultBrewProfileProviderTest {
     private val provider = DefaultBrewProfileProvider()
 
     @Test
-    fun `scale-free starters use source-declared pumped-water goals`() {
-        val profiles = provider.getScaleFreeStarterProfiles(userId = 42)
+    fun `adaptive v2 keeps only its flow limiter and cup weight goal`() {
+        val profile = provider.getDefaultProfiles(1).single { it.name == "Adaptive v2" }
+        val program = assertIsPhases(profile.program)
 
-        assertEquals(5, profiles.size)
-        assertTrue(profiles.all { it.userId == 42L })
-        assertTrue(profiles.all { it.finishCondition is Condition.Volume })
-        assertEquals(
-            listOf(40f, 60f, 60f, 65f, 65f),
-            profiles.map { (it.finishCondition as Condition.Volume).target },
-        )
+        assertEquals(2, program.version)
+        assertEquals(40_000L, program.execution.maximumTotalDurationMillis)
+        assertEquals(Condition.Weight(36f), profile.finishCondition)
+        assertTrue(program.phases.all { it.temperatureC == null })
+        assertTrue(program.phases.none { it.secondaryLimit?.let { limit ->
+            limit.metric == BrewMetric.PumpPressure && limit.ceiling == 9.5f
+        } == true })
+        assertEquals(3.5f, program.phases.single { it.name == "Pressurize" }.secondaryLimit?.ceiling)
+        assertEquals(BrewMetric.PumpFlow, program.phases.single { it.name == "Pressurize" }.secondaryLimit?.metric)
+        assertEquals(PhaseControl.Flow(3.5f), program.phases.last().control)
+        assertTrue(profile.description.contains("Aim: 36 g"))
     }
 
     @Test
-    fun `classic 9 bar starter is a timed preinfusion baseline`() {
-        val profile = provider.getScaleFreeStarterProfiles(1).first()
-        val program = assertIs<BrewProgram.Phases>(profile.program)
+    fun `londinium matches editor phases and weight target`() {
+        val profile = provider.getDefaultProfiles(1).single { it.name == "Londinium" }
+        val program = assertIsPhases(profile.program)
 
-        assertEquals("Classic 9 Bar + Preinfusion (No Scale)", profile.name)
-        assertEquals(listOf(8_000L, 30_000L), program.phases.map { it.maximumDurationMillis })
+        assertEquals(2, program.version)
+        assertEquals(40_000L, program.execution.maximumTotalDurationMillis)
+        assertEquals(Condition.Weight(38f), profile.finishCondition)
+        assertEquals(7, program.phases.size)
+        assertEquals(PhaseControl.Pressure(9f), program.phases[3].control)
         assertEquals(
-            listOf(PhaseControl.Pressure(3f), PhaseControl.Pressure(9f)),
-            program.phases.map { it.control },
+            BrewMetric.PumpFlow to ThresholdComparison.StrictlyAbove,
+            program.phases[4].exitConditions.single().let { it.metric to it.comparison },
         )
-        assertTrue(profile.description.contains("not a copied source profile"))
-        assertTrue(profile.description.contains("not cup yield"))
+        assertEquals(2.8f, program.phases[4].exitConditions.single().threshold)
+        assertEquals(PhaseControl.Flow(2.5f), program.phases.last().control)
+        assertTrue(profile.description.contains("9 bar peak"))
+        assertFalse(profile.description.contains("9.5 bar"))
     }
 
     @Test
-    fun `LRv3 adaptation retains a timed stepped 9 bar decline`() {
-        val profile = provider.getScaleFreeStarterProfiles(1)[3]
-        val program = assertIs<BrewProgram.Phases>(profile.program)
-        assertEquals(
-            "LRv3-inspired 9 Bar Taper (No Scale)",
-            profile.name,
-        )
-        assertEquals(
-            listOf(6_000L, 8_000L, 4_000L, 12_000L, 7_000L, 7_000L, 7_000L, 7_000L, 7_000L),
-            program.phases.map { it.maximumDurationMillis },
-        )
-        assertEquals(
-            listOf(9f, 8f, 7f, 6f, 5.5f),
-            program.phases.takeLast(5).map { (it.control as PhaseControl.Pressure).bar },
-        )
-        assertTrue(profile.description.contains("source-exact Decent community capture"))
-        assertTrue(profile.description.contains("smooth 9 to 5.5 bar decline over 35 s"))
-        assertTrue(profile.description.contains("five 7 s pressure steps"))
-        assertTrue(profile.description.contains("not equivalent measurements"))
-        assertTrue(profile.description.contains("42 g cup-weight stop"))
+    fun `editor recipe metadata survives program serialization`() {
+        val profile = provider.getDefaultProfiles(1).single { it.name == "Adaptive v2" }
+        val program = assertIsPhases(profile.program)
+        val json = Json { encodeDefaults = true }
+
+        assertEquals(program, json.decodeFromString<BrewProgram>(json.encodeToString<BrewProgram>(program)))
+        val recipe = assertNotNull(program.recipe)
+        assertEquals(36f, recipe.settings.targetYieldG)
     }
 
-    @Test
-    fun `Hendon adaptation retains the 6 to 4 bar decline and no-scale volume stop`() {
-        val profile = provider.getScaleFreeStarterProfiles(1)[4]
-        val program = assertIs<BrewProgram.Phases>(profile.program)
-
-        assertEquals("Hendon 6 Bar Decline (No Scale)", profile.name)
-        assertEquals(
-            listOf(5_000L, 8_000L, 8_000L, 5_000L, 5_000L, 5_000L, 10_000L, 10_000L),
-            program.phases.map { it.maximumDurationMillis },
-        )
-        assertEquals(PhaseControl.Flow(5.5f), program.phases[1].control)
-        assertEquals(PhaseControl.Flow(3.3f), program.phases.last().control)
-        assertEquals(
-            listOf(5.3f, 4.7f, 4f),
-            program.phases.slice(3..5).map { (it.control as PhaseControl.Pressure).bar },
-        )
-        assertTrue(profile.description.contains("source-exact Decent community capture"))
-        assertTrue(profile.description.contains("smooth 6 to 4 bar decline over 15 s"))
-        assertTrue(profile.description.contains("65 mL pumped-water stop"))
-        assertTrue(profile.description.contains("not an exact reproduction"))
-    }
-
-    @Test
-    fun `default profile restore includes the scale-free source profiles`() {
-        val starters = provider.getScaleFreeStarterProfiles(7)
-        val defaults = provider.getDefaultProfiles(7)
-
-        assertTrue(starters.all { starter -> defaults.any { it.name == starter.name && it.userId == 7L } })
-    }
+    private fun assertIsPhases(program: BrewProgram): BrewProgram.Phases =
+        (program as? BrewProgram.Phases) ?: error("Expected a phase recipe")
 }

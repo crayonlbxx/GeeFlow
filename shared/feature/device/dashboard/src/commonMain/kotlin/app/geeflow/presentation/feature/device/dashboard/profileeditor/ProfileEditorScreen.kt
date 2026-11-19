@@ -1,5 +1,6 @@
 package app.geeflow.presentation.feature.device.dashboard.profileeditor
 
+import geeflow.shared.feature.device.dashboard.generated.resources.profile_editor_advanced_recipe
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -198,6 +199,7 @@ private fun ExpandedLayout(
                     .fillMaxWidth()
                     .padding(vertical = 16.dp),
             )
+            if (viewState.advancedProgram) Text(stringResource(Res.string.profile_editor_advanced_recipe), modifier = Modifier.padding(16.dp))
             BrewCharts(
                 model = viewState.chartModel(),
                 visibleCharts = viewState.visibleCharts,
@@ -210,8 +212,8 @@ private fun ExpandedLayout(
             )
         }
         ProfileStepsColumn(
-            steps = viewState.steps,
-            allowAdd = !viewState.isRecording,
+            steps = if (viewState.advancedProgram) emptyList() else viewState.steps,
+            allowAdd = !viewState.isRecording && !viewState.advancedProgram,
             finishTarget = viewState.finishTarget,
             onEvent = onEvent,
             modifier = Modifier
@@ -247,6 +249,7 @@ private fun CompactLayout(
         },
     ) { paddingValues ->
         Column(modifier = Modifier.padding(paddingValues)) {
+            if (viewState.advancedProgram) Text(stringResource(Res.string.profile_editor_advanced_recipe), modifier = Modifier.padding(16.dp))
             BrewCharts(
                 model = viewState.chartModel(),
                 visibleCharts = viewState.visibleCharts,
@@ -258,8 +261,8 @@ private fun CompactLayout(
                 modifier = Modifier.fillMaxWidth().padding(start = 24.dp, top = 16.dp, end = 24.dp),
             )
             ProfileStepsRow(
-                steps = viewState.steps,
-                allowAdd = !viewState.isRecording,
+                steps = if (viewState.advancedProgram) emptyList() else viewState.steps,
+                allowAdd = !viewState.isRecording && !viewState.advancedProgram,
                 finishTarget = viewState.finishTarget,
                 onEvent = onEvent,
                 modifier = Modifier

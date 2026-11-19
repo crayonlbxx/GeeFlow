@@ -216,7 +216,35 @@ class LiveRecipeEngineTest {
         assertEquals("global_volume", engine(document).tick(0, measurements(0, pressure = 2f, volume = 40f)).finish)
     }
     @Test fun existingAdaptiveProbeConvertsWithoutRecipeSpecificRuntimeLogic() {
-        val source = app.geeflow.data.brew.provider.DefaultBrewProfileProvider().getScaleFreeStarterProfiles(1)[1]
+        val source = BrewProfile(
+            userId = 1,
+            name = "Adaptive probe fixture",
+            description = "",
+            finishCondition = Condition.Volume(60f),
+            program = BrewProgram.Phases(
+                phases = listOf(
+                    BrewPhase(
+                        id = "preinfusion",
+                        control = PhaseControl.Flow(3.5f),
+                        maximumDurationMillis = 15_000,
+                        exitConditions = listOf(
+                            ExitCondition(BrewMetric.PumpPressure, ThresholdComparison.StrictlyAbove, 4f),
+                        ),
+                    ),
+                    BrewPhase(
+                        id = "adaptive-extraction",
+                        control = PhaseControl.Flow(12f),
+                        maximumDurationMillis = 60_000,
+                        ramp = PhaseRamp(RampStyle.Linear, 7_000, RampStart.PreviousTarget),
+                        adaptiveFlowProbe = AdaptiveFlowProbe(
+                            samplingDurationMillis = 7_000,
+                            pressureCeilingBar = 8.8f,
+                            flowBackoffMillilitresPerSecond = 0.1f,
+                        ),
+                    ),
+                ),
+            ),
+        )
         val document = LiveRecipeImport.fromProfile(source, "generic-probe")
         assertTrue(LiveRecipeCompiler.issues(document).isEmpty())
         val runtime = engine(document)
@@ -227,12 +255,12 @@ class LiveRecipeEngineTest {
         assertEquals(3f, runtime.tick(15_000, measurements(15_000, pressure = 8f, flow = 3f)).requestedTarget!!, .001f)
         assertEquals(2.7f, runtime.tick(15_100, measurements(15_100, pressure = 9f, flow = 2.8f)).requestedTarget!!, .001f)
     }
-    @Test fun sourceBoundsCompileForShadowButLiveRequiresHardwareValidation() {
+    @Test fun sourceBoundsAreCheckedAgainstActualMachineRange() {
         val recipe = fixture("best_practice.json").copy(mappingsAccepted = true)
         LiveRecipeCompiler.compile(recipe)
-        val capabilities = ProfilingCapabilities(livePressure = mapOf(PressureLocation.Pump to TargetRange(0f, 12f, .1f)),
+        val capabilities = ProfilingCapabilities(livePressure = mapOf(PressureLocation.Pump to TargetRange(0f, 10f, .1f)),
             minimumWriteIntervalMillis = 100, telemetry = setOf(BrewMetric.PumpPressure, BrewMetric.PumpFlow, BrewMetric.PumpedVolume))
-        assertTrue(LiveRecipeCompiler.issues(recipe, capabilities).any { "hardware validation" in it })
-        assertFalse(LiveRecipeCompiler.issues(fixture("cremina.json").copy(mappingsAccepted = true), capabilities).any { "hardware validation" in it })
+        assertTrue(LiveRecipeCompiler.issues(recipe, capabilities).any { "Machine cannot provide" in it })
+        assertFalse(LiveRecipeCompiler.issues(fixture("cremina.json").copy(mappingsAccepted = true), capabilities).any { "Machine cannot provide" in it })
     }
 }

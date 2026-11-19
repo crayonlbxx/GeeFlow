@@ -99,15 +99,39 @@ internal fun DeviceDashboardScreen(
     val liveService = rememberLiveBrewServiceStarter()
     val localRecipes by liveService.recipes.recipes.collectAsStateWithLifecycle()
     val scale = koinInject<BookooScaleConnection>()
-    val scaleDevices by scale.devices.collectAsStateWithLifecycle()
     val scaleState by scale.state.collectAsStateWithLifecycle()
+    var previousScaleStatus by remember { mutableStateOf<String?>(null) }
+    val scaleStatus = when {
+        scaleState.connecting -> "connecting"
+        scaleState.connected && scaleState.receiving -> "receiving"
+        scaleState.connected -> "waiting"
+        else -> "disconnected"
+    }
+    LaunchedEffect(scaleStatus) {
+        val previous = previousScaleStatus
+        previousScaleStatus = scaleStatus
+        val message = when {
+            previous == null -> null
+            scaleStatus == "receiving" -> "Scale connected · receiving weight"
+            scaleStatus == "waiting" -> "Scale connected · waiting for weight readings"
+            scaleStatus == "disconnected" && previous != "disconnected" -> "Scale disconnected"
+            else -> null
+        }
+        if (message != null) {
+            snackbarState.currentSnackbarData?.dismiss()
+            snackbarState.showSnackbar(message)
+        }
+    }
     val liveBrewCoordinator = koinInject<LiveBrewTestCoordinator>()
     val liveRun by liveBrewCoordinator.state.collectAsStateWithLifecycle()
     var selectedLiveRecipe by remember { mutableStateOf<LiveRecipeDocument?>(null) }
 
     val provider = koinInject<DeviceControllerProvider>()
     val deviceId = viewState.device.id
-    val ownsLiveShot = liveRun.deviceId == deviceId && liveRun.mode == LiveTestMode.LiveControl
+    val ownsLiveShot = liveRun.deviceId == deviceId && liveRun.mode in setOf(
+        LiveTestMode.LiveControl,
+        LiveTestMode.CommandEncodingProbe,
+    )
     val liveActive = ownsLiveShot && liveRun.active
     val liveStopPending = ownsLiveShot && liveRun.stopPending
     val runRecipe = remember(liveRun.recipeSnapshot) {
@@ -115,21 +139,25 @@ internal fun DeviceDashboardScreen(
     }
     val selectedRecipe = if (liveActive || liveStopPending) runRecipe ?: selectedLiveRecipe else selectedLiveRecipe
     val sameRecipe = selectedRecipe != null && liveRun.deviceId == deviceId && runRecipe?.id == selectedRecipe.id
-    val sample = liveRun.lastSample.takeIf { liveActive && sameRecipe }
+    val sample = liveRun.lastSample.takeIf { sameRecipe }
+    var reportedExtractionRunId by remember { mutableStateOf<Long?>(null) }
+    androidx.compose.runtime.LaunchedEffect(liveRun.runId, liveRun.samples, sameRecipe) {
+        val runId = liveRun.runId ?: return@LaunchedEffect
+        if (!sameRecipe || reportedExtractionRunId == runId) return@LaunchedEffect
+        val extractionPhaseId = runRecipe?.phases?.firstOrNull { phase ->
+            phase.name.trim().equals("Extraction", true) || phase.name.trim().equals("Extraction start", true)
+        }?.id ?: return@LaunchedEffect
+        liveRun.samples.firstOrNull { it.phaseId == extractionPhaseId }?.let { extractionSample ->
+            reportedExtractionRunId = runId
+            viewModel.handleEvent(DeviceDashboardEvent.ExtractionPhaseStarted(extractionSample.elapsedMillis))
+        }
+    }
     val liveIssues = remember(provider, deviceId, selectedRecipe) {
         selectedRecipe?.let { LiveRecipeCompiler.issues(it, provider.getController(deviceId).profilingCapabilities) }.orEmpty()
     }
 
-    LaunchedEffect(liveActive, liveStopPending, viewState.device.isBrewing) {
-        if (liveActive || liveStopPending || viewState.device.isBrewing) pagerState.animateScrollToPage(1)
-    }
-
     ForegroundEffect(viewModel) {
         viewModel.handleEvent(DeviceDashboardEvent.Resumed)
-    }
-
-    LaunchedEffect(selectedLiveRecipe?.id) {
-        if (selectedLiveRecipe != null) scale.startScan()
     }
 
     RecipeDashboardContent(
@@ -141,34 +169,48 @@ internal fun DeviceDashboardScreen(
         pagerState = pagerState,
         selectedLiveRecipe = selectedRecipe,
         localRecipes = localRecipes,
-        scaleDevices = scaleDevices,
         scaleConnected = scaleState.connected,
-        connectedScaleName = scaleState.device?.name,
-        connectingScale = scaleState.lastMessage == null && !scaleState.connected && scaleState.device != null,
-        cupFlowGramsPerSecond = sample?.let { it.derivedCupFlowGramsPerSecond ?: it.reportedCupFlowGramsPerSecond },
+        scaleReceiving = scaleState.receiving,
+        connectingScale = scaleState.connecting,
+        cupFlowGramsPerSecond = sample?.let { it.reportedCupFlowGramsPerSecond ?: it.derivedCupFlowGramsPerSecond },
         scaleWeightGrams = sample?.weightGrams,
         liveSamples = liveRun.samples.takeIf { sameRecipe }.orEmpty(),
         liveIssues = liveIssues,
         liveActive = liveActive,
         liveStopPending = liveStopPending,
         onStopLiveRecipe = { coroutineScope.launch { liveBrewCoordinator.stop(deviceId) } },
-        onLiveRecipeSelected = { recipe ->
+            onLiveRecipeSelected = { recipe ->
             selectedLiveRecipe = recipe
-            viewModel.handleEvent(DeviceDashboardEvent.LiveRecipeSelected(recipe.name, recipe.mappings.joinToString("\n")))
+                viewModel.handleEvent(
+                    DeviceDashboardEvent.LiveRecipeSelected(
+                        name = recipe.name,
+                        description = recipe.mappings.joinToString("\n"),
+                        extractionPhaseId = recipe.phases.firstOrNull { phase ->
+                            phase.name.trim().equals("Extraction", true) || phase.name.trim().equals("Extraction start", true)
+                        }?.id,
+                    ),
+                )
             coroutineScope.launch { pagerState.animateScrollToPage(1) }
         },
         onLiveRecipeFavoriteChanged = liveService.recipes::save,
-        onConnectScale = { device ->
-            coroutineScope.launch {
-                runCatching { scale.connect(device.id, coroutineScope) }
-                    .onFailure { error -> snackbarState.showSnackbar(error.message ?: "Could not connect BOOKOO scale") }
+        onScaleToggle = {
+            if (scaleState.connected) {
+                coroutineScope.launch { scale.disconnect() }
+            } else {
+                viewModel.withBluetoothPermissions(requireBluetoothPermission = true) {
+                    try {
+                        scale.connectBookoo(coroutineScope)
+                    } catch (error: Exception) {
+                        snackbarState.showSnackbar(error.message ?: "Could not connect BOOKOO scale")
+                    }
+                }
             }
         },
-        onRescanScales = scale::startScan,
+        preferredDoseGrams = viewState.preferredShotDoseGrams,
         onBackToLibrary = {
             coroutineScope.launch {
                 pagerState.animateScrollToPage(0)
-                selectedLiveRecipe = null
+                if (viewState.brew.historyId == null) selectedLiveRecipe = null
             }
         },
         onStartLiveRecipe = { settings ->
@@ -205,15 +247,27 @@ internal fun DeviceDashboardScreen(
                 viewModel.handleEvent(
                     DeviceDashboardEvent.HistoryBrewSelected(
                         name = it.name,
+                        description = it.description,
                         durationSeconds = it.durationSeconds,
                         data = it.data,
+                        scaleSamples = it.scaleSamples,
                         targetData = it.targetData,
                         targetWeightGrams = it.targetWeightGrams,
                         phaseProgram = it.phaseProgram,
                         phaseTransitions = it.phaseTransitions,
+                        id = it.id,
+                        startedAt = it.startedAt,
+                        endedAt = it.endedAt,
+                        doseGrams = it.doseGrams,
+                        grindSetting = it.grindSetting,
+                        extractionStartMillis = it.extractionStartMillis,
+                        extractionStartEstimated = it.extractionStartEstimated,
+                        finalWeightGrams = it.finalWeightGrams,
+                        recipeRatio = it.recipeRatio,
+                        recipeTargetGrams = it.recipeTargetGrams,
+                        recordedPhaseIds = it.recordedPhaseIds,
                     ),
                 )
-                selectedLiveRecipe = null
                 coroutineScope.launch { pagerState.animateScrollToPage(1) }
             }
 

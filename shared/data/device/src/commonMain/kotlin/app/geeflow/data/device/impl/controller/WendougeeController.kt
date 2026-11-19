@@ -42,10 +42,7 @@ import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
-import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.isActive
@@ -54,21 +51,14 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeout
-import kotlin.time.Duration.Companion.milliseconds
 import kotlin.time.Clock
+import kotlin.time.Duration.Companion.milliseconds
 
 internal class WendougeeController(
     val model: SupportedDevice,
     private val scope: CoroutineScope,
     private val transport: WendougeeBleTransport,
 ) : DeviceController, DeviceConnectionControl, MachineDiagnosticEventSource {
-    private val mutableDiagnosticEvents = MutableSharedFlow<MachineDiagnosticEvent>(extraBufferCapacity = 512)
-    override val diagnosticEvents: SharedFlow<MachineDiagnosticEvent> = mutableDiagnosticEvents.asSharedFlow()
-    private val mutableStopPriority = MutableStateFlow(false)
-    internal val stopPriorityRequested: StateFlow<Boolean> = mutableStopPriority
-
-    internal fun requestStopPriority() { mutableStopPriority.value = true }
-    internal fun clearStopPriority() { mutableStopPriority.value = false }
     override var connectionGeneration: Long = 0
         private set
     override val connection: DeviceConnectionControl get() = this
@@ -81,11 +71,15 @@ internal class WendougeeController(
 
     override val profilingCapabilities = TimedPumpProfileSupport.capabilities.let { shared ->
         when (model) {
+            SupportedDevice.LitaBA -> shared.copy(
+                liveModeSwitch = true,
+                verifiedSecondaryLimits = true,
+                timestampedCupWeight = true,
+            )
             SupportedDevice.LitaBR,
             SupportedDevice.LitaLR -> shared.copy(
                 native = shared.native?.copy(flow = false),
                 liveFlow = null,
-                liveModeSwitch = false,
             )
             else -> shared
         }
@@ -100,6 +94,8 @@ internal class WendougeeController(
     }
 
     private val stateStore = WendougeeStateStore()
+    private val mutableDiagnosticEvents = MutableSharedFlow<MachineDiagnosticEvent>(extraBufferCapacity = 512)
+    override val diagnosticEvents: SharedFlow<MachineDiagnosticEvent> = mutableDiagnosticEvents
     override val deviceState = stateStore.machine
     override val foundScales = stateStore.scales
     override val foundSingleDoseGrinders = stateStore.grinders
@@ -250,7 +246,6 @@ internal class WendougeeController(
         withTimeout(INIT_POLL_TIMEOUT_MS) { deviceState.first { it.config != null } }
         readWaterAlarmRegister(active)
         val firmware = readWendougeeFirmware(active.modbus)
-        active.profileFormat = resolveWendougeeProfileFormat(model, firmware)
         stateStore.updateMachine {
             it.copy(firmwareVersion = firmware, agileRingSupported = supportsAgileRing(model, firmware))
         }
@@ -272,14 +267,9 @@ internal class WendougeeController(
 
     private suspend fun runPollingLoop(active: WendougeeSession) {
         while (currentCoroutineIsActive()) {
-            if (stopPriorityRequested.value) {
-                delay(STOP_PRIORITY_POLL_DELAY_MS)
-                continue
-            }
             runCatching { pollLongOnce(active) }
                 .onFailure { Logger.withTag(TAG).w(it) { "Poll long missed" } }
             delay(POLL_BETWEEN_DELAY_MS)
-            if (stopPriorityRequested.value) continue
             runCatching { pollShortOnce(active) }
                 .onFailure { Logger.withTag(TAG).w(it) { "Poll short missed" } }
             val interval = if (_deviceState.value.brewStatus == DeviceState.BrewStatus.FreeVariable) {

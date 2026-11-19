@@ -40,6 +40,19 @@ class UserSettingsRepositoryImplTest {
         assertEquals(FlowChartRange.EIGHT, reopenedRepository.flowChartRange(userId = 1).first())
         assertEquals(FlowChartRange.FOUR, reopenedRepository.flowChartRange(userId = 2).first())
     }
+
+    @Test
+    fun preferredShotDosePersistsPerUser() = runTest {
+        val dataStore = InMemoryPreferencesDataStore()
+        val repository = UserSettingsRepositoryImpl(dataStore)
+        assertEquals(18f, repository.preferredShotDoseGrams(1).first())
+
+        repository.setPreferredShotDoseGrams(1, 15f)
+
+        val reopenedRepository = UserSettingsRepositoryImpl(dataStore)
+        assertEquals(15f, reopenedRepository.preferredShotDoseGrams(1).first())
+        assertEquals(18f, reopenedRepository.preferredShotDoseGrams(2).first())
+    }
 }
 
 private class InMemoryPreferencesDataStore : DataStore<Preferences> {

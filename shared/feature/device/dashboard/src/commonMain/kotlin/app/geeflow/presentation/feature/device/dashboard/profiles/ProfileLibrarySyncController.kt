@@ -5,9 +5,6 @@ import kotlinx.coroutines.flow.StateFlow
 /** App-level profile library controls exposed to the profile list. */
 interface ProfileLibrarySyncController {
     val state: StateFlow<ProfileLibrarySyncState>
-    fun start()
-    suspend fun setToken(token: String)
-    suspend fun tokenConfigured(): Boolean
     suspend fun syncNow()
 }
 
@@ -16,5 +13,5 @@ data class ProfileLibrarySyncState(
     val message: String? = null,
     val lastSyncedAt: String? = null,
 ) {
-    enum class Phase { NotConfigured, Syncing, Synced, Offline, Error }
+    enum class Phase { NotConfigured, Ready, Syncing, Synced, Offline, Error }
 }

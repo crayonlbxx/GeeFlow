@@ -45,6 +45,17 @@ object LiveTestCaptureFormatter {
 
     fun verificationReport(state: LiveTestRunState): String {
         val commands = state.captureEvents.filter { it.type == "command_enqueued" }
+        val probeTargets = state.captureEvents.filter { it.type == "probe_target_write_requested" }
+        val completedProbeTargets = state.captureEvents.filter { it.type == "probe_target_write_completed" }
+        val probeModeChanges = state.captureEvents.filter { it.type == "probe_mode_switch_completed" }
+        val modeProbeConfig = state.captureEvents.firstOrNull {
+            it.type in setOf("command_probe_configuration", "mode_switch_probe_configuration", "native_priority_probe_configuration")
+        }
+        val modeProbeStages = state.captureEvents.filter { it.type == "probe_stage_summary" }
+        val modbusRequests = state.captureEvents.count { it.type == "modbus_tx" || it.type == "machine_frame_modbus_tx" }
+        val validatedModbusResponses = state.captureEvents.count {
+            it.type == "modbus_response_validated" || it.type == "machine_frame_modbus_response_validated"
+        }
         val acknowledgements = state.captureEvents.mapNotNull { event ->
             if (event.type == "command_acknowledged") event.fields["acknowledgement_latency_ms"]?.toLongOrNull() else null
         }
@@ -55,6 +66,34 @@ object LiveTestCaptureFormatter {
             appendLine("Mode: ${state.mode ?: "unknown"}")
             appendLine("Full local recipe snapshot included: ${state.recipeSnapshot != null}")
             appendLine("Captured samples: ${state.samples.size}")
+            if (state.mode == LiveTestMode.CommandEncodingProbe) {
+                appendLine("Probe path: ${modeProbeConfig?.fields?.get("test_path") ?: "legacy encoding matrix"}")
+                appendLine("Target writes requested/completed: ${probeTargets.size}/${completedProbeTargets.size}")
+                appendLine("Live mode-register changes completed: ${probeModeChanges.size}")
+                appendLine("Raw Modbus requests captured: $modbusRequests")
+                appendLine("Validated Modbus responses captured: $validatedModbusResponses")
+                appendLine("Scale packets captured: ${state.captureEvents.count { it.type == "scale_packet" }}")
+                appendLine("Decoded scale packets: ${state.captureEvents.count { it.type == "scale_packet" && it.fields["decoded"] == "true" }}")
+                if (modeProbeConfig != null) {
+                    appendLine("Expected stages: ${modeProbeConfig.fields["expected_stages"] ?: modeProbeConfig.fields["stages"].orEmpty()}")
+                    appendLine("Per-stage sensor summaries:")
+                    modeProbeStages.forEach { event ->
+                        appendLine(
+                            "  ${event.fields["stage_id"]} ${event.fields["control"]} target=${event.fields["target"]} ${event.fields["unit"]}; " +
+                                "samples=${event.fields["sensor_samples"]}, pressure=${event.fields["pressure_min_bar"]}..${event.fields["pressure_max_bar"]} bar " +
+                                "(end ${event.fields["pressure_end_bar"]}), pump flow=${event.fields["machine_flow_min_ml_s"]}..${event.fields["machine_flow_max_ml_s"]} mL/s " +
+                                "(end ${event.fields["machine_flow_end_ml_s"]}), volume Δ=${event.fields["machine_volume_delta_ml"]} mL, " +
+                                "scale Δ=${event.fields["scale_weight_delta_g"]} g",
+                        )
+                    }
+                    if (modeProbeConfig.fields["test_path"] == LiveModeProbePath.NativeStagePriority.id) {
+                        appendLine("Native mode priority is preloaded per stage; the expected stage window is time-derived because firmware stage-index readback is unavailable.")
+                    }
+                    appendLine("A Modbus write acknowledgement confirms the frame exchange, not that the active machine regulator followed the target.")
+                } else {
+                    appendLine("Pressure/flow readings are sensor telemetry; they do not by themselves validate the device's internal target register.")
+                }
+            }
             appendLine("Command attempts: ${commands.size}")
             appendLine("Acknowledged commands: ${acknowledgements.size}")
             appendLine("Maximum command acknowledgement latency: ${acknowledgements.maxOrNull()?.let { "$it ms" } ?: "not measured"}")

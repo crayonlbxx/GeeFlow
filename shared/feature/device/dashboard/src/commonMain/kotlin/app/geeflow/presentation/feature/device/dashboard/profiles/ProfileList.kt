@@ -58,7 +58,6 @@ import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import app.geeflow.domain.device.recipe.RecipeControl
@@ -94,12 +93,12 @@ import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.brew.model.Condition
+import app.geeflow.data.brew.model.FreeHandControlMode
 import app.geeflow.data.brew.model.PhaseControl
 import app.geeflow.presentation.feature.device.dashboard.profiles.ProfileListViewState.HistoryBrew
 import app.geeflow.presentation.feature.device.dashboard.profiles.ProfileListViewState.Profile
@@ -129,21 +128,15 @@ import geeflow.shared.feature.device.dashboard.generated.resources.profile_list_
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_list_show_profiles
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_list_target_volume
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_list_target_weight
-import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_change_token
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_close
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_connected
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_error
-import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_forget_token
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_not_configured
-import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_now
+import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_ready
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_offline
-import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_save
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_syncing
 import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_title
-import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_token
-import geeflow.shared.feature.device.dashboard.generated.resources.profile_sync_token_help
 import kotlinx.coroutines.launch
-import geeflow.shared.feature.device.dashboard.generated.resources.dashboard_preview_only
 import geeflow.shared.feature.device.dashboard.generated.resources.dashboard_review_recipe
 import geeflow.shared.feature.device.dashboard.generated.resources.dashboard_recipe_unavailable
 import geeflow.shared.feature.device.dashboard.generated.resources.dashboard_import_recipe
@@ -171,8 +164,6 @@ internal fun ProfileList(
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var selectedFilter by rememberSaveable { mutableStateOf(ProfileFilter.All) }
     var showProfileLibraryDialog by remember { mutableStateOf(false) }
-    var editingProfileLibraryToken by remember { mutableStateOf(false) }
-    var profileLibraryToken by remember { mutableStateOf("") }
     val filterOptions = ProfileFilter.entries
     val filteredProfiles = remember(viewState.profiles, searchQuery, selectedFilter) {
         viewState.profiles.filter { profile ->
@@ -202,8 +193,7 @@ internal fun ProfileList(
         verticalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         val openProfileLibrary = {
-            editingProfileLibraryToken = !viewState.profileLibraryTokenConfigured
-            profileLibraryToken = ""
+            onEvent(ProfileListEvent.SyncProfileLibraryNow)
             showProfileLibraryDialog = true
         }
         var actionsOpen by remember { mutableStateOf(false) }
@@ -238,6 +228,19 @@ internal fun ProfileList(
                 }
             }
             if (!viewState.showHistory) ProfileLibraryButton(viewState.profileLibrarySyncState, onClick = openProfileLibrary)
+            val historyLabel = stringResource(
+                if (viewState.showHistory) Res.string.profile_list_show_profiles else Res.string.profile_list_history,
+            )
+            if (phone) {
+                IconButton(onClick = { onEvent(ProfileListEvent.HistoryClicked) }) {
+                    Icon(Icons.Filled.History, contentDescription = historyLabel)
+                }
+            } else {
+                TextButton(onClick = { onEvent(ProfileListEvent.HistoryClicked) }) {
+                    Icon(Icons.Filled.History, contentDescription = null)
+                    Text(historyLabel, modifier = Modifier.padding(start = 4.dp))
+                }
+            }
             Box {
                 IconButton(onClick = { actionsOpen = true }) {
                     Icon(Icons.Filled.MoreVert, contentDescription = stringResource(Res.string.dashboard_recipe_actions))
@@ -246,7 +249,6 @@ internal fun ProfileList(
                     val actions = listOf(
                         Res.string.profile_list_new_profile to ProfileListEvent.AddProfileClicked,
                         Res.string.dashboard_import_recipe to ProfileListEvent.OpenLiveRecipe(),
-                        (if (viewState.showHistory) Res.string.profile_list_show_profiles else Res.string.profile_list_history) to ProfileListEvent.HistoryClicked,
                     )
                     actions.forEach { (label, event) ->
                         DropdownMenuItem(text = { Text(stringResource(label)) }, onClick = {
@@ -313,6 +315,8 @@ internal fun ProfileList(
         val syncStatus = when (viewState.profileLibrarySyncState.phase) {
             ProfileLibrarySyncState.Phase.NotConfigured ->
                 stringResource(Res.string.profile_sync_not_configured)
+            ProfileLibrarySyncState.Phase.Ready ->
+                stringResource(Res.string.profile_sync_ready)
             ProfileLibrarySyncState.Phase.Syncing ->
                 stringResource(Res.string.profile_sync_syncing)
             ProfileLibrarySyncState.Phase.Synced ->
@@ -320,7 +324,7 @@ internal fun ProfileList(
             ProfileLibrarySyncState.Phase.Offline ->
                 stringResource(Res.string.profile_sync_offline)
             ProfileLibrarySyncState.Phase.Error ->
-                stringResource(Res.string.profile_sync_error)
+                viewState.profileLibrarySyncState.message ?: stringResource(Res.string.profile_sync_error)
         }
         AlertDialog(
             onDismissRequest = { showProfileLibraryDialog = false },
@@ -329,56 +333,11 @@ internal fun ProfileList(
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(syncStatus)
                     viewState.profileLibrarySyncState.message?.let { Text(it) }
-                    if (editingProfileLibraryToken) {
-                        Text(stringResource(Res.string.profile_sync_token_help))
-                        OutlinedTextField(
-                            value = profileLibraryToken,
-                            onValueChange = { profileLibraryToken = it },
-                            label = { Text(stringResource(Res.string.profile_sync_token)) },
-                            visualTransformation = PasswordVisualTransformation(),
-                            singleLine = true,
-                        )
-                    } else if (viewState.profileLibraryTokenConfigured) {
-                        TextButton(onClick = { editingProfileLibraryToken = true }) {
-                            Text(stringResource(Res.string.profile_sync_change_token))
-                        }
-                    }
                 }
             },
             confirmButton = {
-                TextButton(
-                    onClick = {
-                        if (editingProfileLibraryToken) {
-                            onEvent(ProfileListEvent.SaveProfileLibraryToken(profileLibraryToken))
-                            showProfileLibraryDialog = false
-                        } else {
-                            onEvent(ProfileListEvent.SyncProfileLibraryNow)
-                        }
-                    },
-                    enabled = !editingProfileLibraryToken || profileLibraryToken.isNotBlank(),
-                ) {
-                    Text(
-                        stringResource(
-                            if (editingProfileLibraryToken) Res.string.profile_sync_save else Res.string.profile_sync_now,
-                        ),
-                    )
-                }
-            },
-            dismissButton = {
-                Row {
-                    if (viewState.profileLibraryTokenConfigured) {
-                        TextButton(
-                            onClick = {
-                                onEvent(ProfileListEvent.ClearProfileLibraryToken)
-                                showProfileLibraryDialog = false
-                            },
-                        ) {
-                            Text(stringResource(Res.string.profile_sync_forget_token))
-                        }
-                    }
-                    TextButton(onClick = { showProfileLibraryDialog = false }) {
-                        Text(stringResource(Res.string.profile_sync_close))
-                    }
+                TextButton(onClick = { showProfileLibraryDialog = false }) {
+                    Text(stringResource(Res.string.profile_sync_close))
                 }
             },
         )
@@ -534,7 +493,6 @@ private fun ProfilesColumn(
                                 style = MaterialTheme.typography.bodySmall,
                             )
                             val readiness = when {
-                                recipe.settings.pressureCeilingBar > 9f -> Res.string.dashboard_preview_only
                                 recipe.mappings.isNotEmpty() && !recipe.mappingsAccepted -> Res.string.dashboard_review_recipe
                                 LiveRecipeCompiler.issues(recipe).isNotEmpty() -> Res.string.dashboard_recipe_unavailable
                                 !liveScaleConnected -> Res.string.dashboard_scale_required
@@ -849,10 +807,8 @@ private fun ProfileCard(
                 Text(it, style = MaterialTheme.typography.bodySmall, maxLines = if (phone) 1 else 5, overflow = TextOverflow.Ellipsis)
             }
         }
-        val targets = remember(profile.targetData) {
-            profile.targetData.entries.sortedBy { it.key }.map { (time, data) ->
-                PreviewTarget(time, data.pressure, data.volumePerSecond)
-            }
+        val targets = remember(profile.program, profile.targetData) {
+            profile.previewTargets()
         }
         if (phone) {
             Row(
@@ -875,12 +831,28 @@ private fun ProfileCard(
     }
 }
 
-private data class PreviewTarget(
+internal data class PreviewTarget(
     val seconds: Float,
     val pressure: Float? = null,
     val waterFlow: Float? = null,
     val cupFlow: Float? = null,
 )
+
+internal fun Profile.previewTargets(): List<PreviewTarget> {
+    val recordedMode = (program as? BrewProgram.Recording)?.recording?.controlMode
+    return targetData.entries.sortedBy { it.key }.map { (time, data) ->
+        val showFlow = when (recordedMode) {
+            FreeHandControlMode.Flow -> true
+            FreeHandControlMode.Pressure -> false
+            null -> data.pressure <= 0f && data.volumePerSecond > 0f
+        }
+        PreviewTarget(
+            seconds = time,
+            pressure = data.pressure.takeIf { !showFlow && it > 0f },
+            waterFlow = data.volumePerSecond.takeIf { showFlow && it > 0f },
+        )
+    }
+}
 
 private fun livePreviewTargets(recipe: LiveRecipeDocument): List<PreviewTarget> = buildList {
     var elapsedMillis = 0L
@@ -900,10 +872,8 @@ private fun livePreviewTargets(recipe: LiveRecipeDocument): List<PreviewTarget> 
 
 @Composable
 internal fun RecipeCurvePreview(profile: Profile, modifier: Modifier = Modifier.fillMaxWidth().height(64.dp)) {
-    val targets = remember(profile.targetData) {
-        profile.targetData.entries.sortedBy { it.key }.map { (time, data) ->
-            PreviewTarget(time, data.pressure, data.volumePerSecond)
-        }
+    val targets = remember(profile.program, profile.targetData) {
+        profile.previewTargets()
     }
     ProfileLinePreview(targets, modifier)
 }

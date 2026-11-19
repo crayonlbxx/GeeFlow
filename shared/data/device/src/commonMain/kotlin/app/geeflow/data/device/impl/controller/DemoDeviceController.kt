@@ -60,7 +60,11 @@ class DemoDeviceController(
 
     override suspend fun stopLiveSession() = stopFreeVariableBrewing()
     override fun isLiveSessionActive(state: DeviceState) = state.brewStatus == DeviceState.BrewStatus.FreeVariable
-    override val profilingCapabilities = TimedPumpProfileSupport.capabilities
+    override val profilingCapabilities = TimedPumpProfileSupport.capabilities.copy(
+        liveModeSwitch = true,
+        verifiedSecondaryLimits = true,
+        timestampedCupWeight = true,
+    )
     override fun assessNativeProfile(profile: BrewProfile) = TimedPumpProfileSupport.assessNative(profile)
     override fun telemetry() = deviceState.value.let { state ->
         // A connected simulator has working pump sensors even before the first brew.
@@ -408,9 +412,11 @@ class DemoDeviceController(
     }
 
     private var freeVarFlowTarget = DEFAULT_FREE_VAR_FLOW
+    private var freeVarMode = FreeHandControlMode.Pressure
 
     override suspend fun startFreeVariableBrewing(mode: FreeHandControlMode) {
         brewJob?.cancel()
+        freeVarMode = mode
         val startedAt = Clock.System.now()
         _deviceState.update {
             it.copy(
@@ -433,7 +439,7 @@ class DemoDeviceController(
             while (_deviceState.value.brewStatus == DeviceState.BrewStatus.FreeVariable) {
                 delay(BREW_TICK_MS.milliseconds)
                 elapsedMs += BREW_TICK_MS
-                val control = if (_deviceState.value.freeHandControlMode == FreeHandControlMode.Flow) {
+                val control = if (freeVarMode == FreeHandControlMode.Flow) {
                     PhaseControl.Flow(freeVarFlowTarget)
                 } else {
                     PhaseControl.Pressure(_deviceState.value.config?.manualBrewPressure ?: DEFAULT_FREE_VAR_PRESSURE)
@@ -442,6 +448,14 @@ class DemoDeviceController(
                 _deviceState.update { it.withBrewPoint(point = point, elapsedMs = elapsedMs) }
             }
         }
+    }
+
+    override suspend fun setFreeVariableBrewingMode(mode: FreeHandControlMode) {
+        check(_deviceState.value.brewStatus == DeviceState.BrewStatus.FreeVariable) {
+            "Mode changes require an active free-variable brew"
+        }
+        freeVarMode = mode
+        _deviceState.update { it.copy(freeHandControlMode = mode) }
     }
 
     override suspend fun stopFreeVariableBrewing() {
@@ -458,10 +472,6 @@ class DemoDeviceController(
                 weightRate = null,
             )
         }
-    }
-
-    override suspend fun setFreeVariableBrewingMode(mode: FreeHandControlMode) {
-        _deviceState.update { it.copy(freeHandControlMode = mode) }
     }
 
     override suspend fun setFreeBrewPressureTarget(pressure: Float) {

@@ -11,6 +11,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import app.geeflow.domain.device.LiveControlSettings
+import app.geeflow.domain.device.LiveModeProbePath
+import app.geeflow.domain.device.LiveModeProbeSequence
 import app.geeflow.domain.device.LiveTestRunState
 import app.geeflow.domain.device.recipe.*
 
@@ -53,6 +55,15 @@ actual fun rememberLiveBrewServiceStarter(): LiveBrewServiceStarter {
             override fun start(deviceId: Long, scaleId: String, settings: LiveControlSettings): String? {
                 return launch(controlIntent(deviceId, scaleId, settings))
             }
+
+            override fun startCommandEncodingProbe(deviceId: Long, path: LiveModeProbePath, sequence: LiveModeProbeSequence): String? = launch(
+                Intent(context, LiveBrewControlService::class.java)
+                    .putExtra(LiveBrewControlService.EXTRA_DEVICE_ID, deviceId)
+                    .putExtra(LiveBrewControlService.EXTRA_COMMAND_PROBE, true)
+                    .putExtra(LiveBrewControlService.EXTRA_COMMAND_PROBE_PATH, path.id)
+                    .putExtra(LiveBrewControlService.EXTRA_COMMAND_PROBE_SEQUENCE, sequence.id)
+                    .putExtra(LiveBrewControlService.EXTRA_DEADLINE, 100_000L),
+            )
 
             private fun launch(intent: Intent): String? {
                 if (Build.VERSION.SDK_INT >= 33 &&

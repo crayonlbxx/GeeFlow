@@ -117,7 +117,6 @@ object LiveRecipeCompiler {
             check(pressure != null && settings.pressureCeilingBar <= pressure.maximum, "Machine cannot provide the configured pump pressure range")
             check(settings.commandIntervalMillis >= capabilities.minimumWriteIntervalMillis, "Machine requires a slower command interval")
             check(document.mappings.isEmpty() || document.mappingsAccepted, "Review and accept source mappings before live execution")
-            check(settings.pressureCeilingBar <= 9f, "Source pressure bounds above 9 bar are available in shadow mode; attended hardware validation is required before live activation")
             val required = (if (settings.maximumVolumeMl != null) listOf(RecipeMetric.Volume) else emptyList()) + document.phases.flatMap { phase -> phase.exits.map { it.metric } + phase.captures.map { it.metric } +
                 listOfNotNull(phase.target.metric, phase.rampStart.metric) +
                 (if (phase.control == RecipeControl.MachineFlow || phase.machineFlowLimitMlPerSecond != null || phase.flowProbe != null) listOf(RecipeMetric.MachineFlow) else emptyList()) }

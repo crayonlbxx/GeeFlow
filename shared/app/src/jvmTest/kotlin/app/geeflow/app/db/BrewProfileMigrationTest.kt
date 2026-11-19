@@ -8,12 +8,47 @@ import kotlin.test.assertEquals
 class BrewProfileMigrationTest {
 
     @Test
-    fun `when version four database migrates then pending profile deletions are retained`() {
+    fun `when version seven history migrates then shot metadata is added without changing saved rows`() {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        driver.use { driver ->
+            driver.execute(
+                null,
+                "CREATE TABLE brew_history (id INTEGER PRIMARY KEY, userId INTEGER NOT NULL, startedAt INTEGER NOT NULL, durationSeconds INTEGER NOT NULL)",
+                0,
+            )
+            driver.execute(null, "INSERT INTO brew_history VALUES (1, 7, 1234, 28)", 0)
+
+            AppDatabase.Schema.migrate(driver, oldVersion = 7, newVersion = 8)
+
+            val migrated = driver.executeQuery(
+                null,
+                "SELECT id, durationSeconds, profileProgram FROM brew_history WHERE id = 1",
+                { cursor ->
+                    cursor.next()
+                    QueryResult.Value(Triple(cursor.getLong(0), cursor.getLong(1), cursor.getString(2)))
+                },
+                0,
+            ).value
+            assertEquals(Triple(1L, 28L, null), migrated)
+            val hasMetadataTable = driver.executeQuery(
+                null,
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'brew_history_metadata'",
+                { cursor -> cursor.next(); QueryResult.Value(cursor.getLong(0)) },
+                0,
+            ).value
+            assertEquals(1L, hasMetadataTable)
+        }
+    }
+
+    @Test
+    fun `when version five database migrates then pending profile deletions and scale samples are retained`() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         driver.use { driver ->
             driver.execute(null, "CREATE TABLE users (id INTEGER PRIMARY KEY)", 0)
+            driver.execute(null, "CREATE TABLE pending_brew_profile_deletions (userId INTEGER NOT NULL, profileId INTEGER NOT NULL)", 0)
+            driver.execute(null, "CREATE TABLE brew_history (id INTEGER PRIMARY KEY, dataPoints TEXT NOT NULL)", 0)
 
-            AppDatabase.Schema.migrate(driver, oldVersion = 4, newVersion = 5)
+            AppDatabase.Schema.migrate(driver, oldVersion = 5, newVersion = 6)
             driver.execute(null, "INSERT INTO users (id) VALUES (7)", 0)
             driver.execute(
                 null,
@@ -31,6 +66,45 @@ class BrewProfileMigrationTest {
             ).value
 
             assertEquals(42L, profileId)
+            val hasScaleSamples = driver.executeQuery(
+                null,
+                "SELECT COUNT(*) FROM pragma_table_info('brew_history') WHERE name = 'scaleSamples'",
+                { cursor -> cursor.next(); QueryResult.Value(cursor.getLong(0)) },
+                0,
+            ).value
+            assertEquals(1L, hasScaleSamples)
+        }
+    }
+
+    @Test
+    fun `when version six history migrates then device id is added without deleting old brews`() {
+        val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
+        driver.use { driver ->
+            driver.execute(
+                null,
+                "CREATE TABLE brew_history (id INTEGER PRIMARY KEY, userId INTEGER NOT NULL, startedAt INTEGER NOT NULL, dataPoints TEXT NOT NULL)",
+                0,
+            )
+            driver.execute(
+                null,
+                "INSERT INTO brew_history (id, userId, startedAt, dataPoints) VALUES (1, 7, 1234, '{}')",
+                0,
+            )
+
+            AppDatabase.Schema.migrate(driver, oldVersion = 6, newVersion = 7)
+
+            val savedBrew = driver.executeQuery(
+                null,
+                "SELECT userId, deviceId, dataPoints FROM brew_history WHERE id = 1",
+                { cursor ->
+                    cursor.next()
+                    QueryResult.Value(Triple(cursor.getLong(0), cursor.getLong(1), cursor.getString(2)))
+                },
+                0,
+            ).value
+            assertEquals(7L, savedBrew.first)
+            assertEquals(null, savedBrew.second)
+            assertEquals("{}", savedBrew.third)
         }
     }
 
@@ -103,13 +177,13 @@ class BrewProfileMigrationTest {
     }
 
     @Test
-    fun `when version three users migrate then the profile seed ledger is created`() {
+    fun `when version two users migrate then the profile seed ledger is created`() {
         val driver = JdbcSqliteDriver(JdbcSqliteDriver.IN_MEMORY)
         driver.use { driver ->
             driver.execute(null, "CREATE TABLE users (id INTEGER PRIMARY KEY)", 0)
             driver.execute(null, "INSERT INTO users (id) VALUES (1)", 0)
 
-            AppDatabase.Schema.migrate(driver, oldVersion = 3, newVersion = 4)
+            AppDatabase.Schema.migrate(driver, oldVersion = 2, newVersion = 3)
 
             val tableExists = driver.executeQuery(
                 null,

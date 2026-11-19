@@ -4,7 +4,7 @@ import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
 import androidx.datastore.preferences.core.edit
 import androidx.datastore.preferences.core.stringPreferencesKey
-import app.geeflow.app.AppCoroutineScope
+import app.geeflow.BuildKonfig
 import app.geeflow.data.brew.BrewProfileRepository
 import app.geeflow.data.brew.model.BrewProfile
 import app.geeflow.data.brew.provider.DefaultBrewProfileProvider
@@ -14,28 +14,15 @@ import app.geeflow.data.user.model.User
 import app.geeflow.presentation.feature.device.dashboard.profiles.ProfileLibrarySyncController
 import app.geeflow.presentation.feature.device.dashboard.profiles.ProfileLibrarySyncState
 import co.touchlab.kermit.Logger
-import kotlinx.coroutines.Job
-import kotlinx.coroutines.FlowPreview
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.ExperimentalCoroutinesApi
-import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.combine
-import kotlinx.coroutines.flow.debounce
-import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
-import kotlinx.coroutines.flow.flatMapLatest
-import kotlinx.coroutines.flow.emptyFlow
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
 import org.koin.core.annotation.Single
 import kotlin.time.Clock
-import kotlin.time.Duration.Companion.milliseconds
-import kotlin.time.Duration.Companion.minutes
 
 @Single(binds = [ProfileLibrarySyncController::class])
 class ProfileLibrarySyncCoordinator(
@@ -45,72 +32,25 @@ class ProfileLibrarySyncCoordinator(
     private val defaultProfiles: DefaultBrewProfileProvider,
     private val users: UserRepository,
     private val userSettings: UserSettingsRepository,
-    private val appScope: AppCoroutineScope,
 ) : ProfileLibrarySyncController {
     private val log = Logger.withTag("ProfileLibrarySync")
     private val json = Json { ignoreUnknownKeys = true; encodeDefaults = true }
     private val mutex = Mutex()
-    private var observationJob: Job? = null
-    private var retryJob: Job? = null
-    private val _state = MutableStateFlow(ProfileLibrarySyncState())
+    private val token = BuildKonfig.PROFILE_LIBRARY_TOKEN.trim()
+    private val _state = MutableStateFlow(
+        ProfileLibrarySyncState(
+            phase = if (token.isBlank()) ProfileLibrarySyncState.Phase.NotConfigured else ProfileLibrarySyncState.Phase.Ready,
+        ),
+    )
     override val state: StateFlow<ProfileLibrarySyncState> = _state.asStateFlow()
-
-    @OptIn(FlowPreview::class)
-    override fun start() {
-        if (observationJob != null) return
-        observationJob = appScope.launch {
-            selectedProfileChanges()
-                .debounce(CHANGE_DEBOUNCE)
-                .collect { change -> syncUser(change.user) }
-        }
-        retryJob = appScope.launch {
-            while (true) {
-                delay(RETRY_INTERVAL)
-                val selectedUser = users.selectedUser.first()
-                if (selectedUser != null) syncUser(selectedUser)
-            }
-        }
-    }
-
-    override suspend fun setToken(token: String) {
-        dataStore.edit { preferences ->
-            val normalized = token.trim()
-            if (normalized.isEmpty()) preferences.remove(TOKEN_KEY)
-            else preferences[TOKEN_KEY] = normalized
-        }
-        val selectedUser = users.selectedUser.first()
-        if (selectedUser == null) {
-            _state.value = ProfileLibrarySyncState(phase = ProfileLibrarySyncState.Phase.NotConfigured)
-        } else {
-            syncUser(selectedUser)
-        }
-    }
-
-    override suspend fun tokenConfigured(): Boolean = dataStore.data.first()[TOKEN_KEY].orEmpty().isNotBlank()
 
     override suspend fun syncNow() {
         val selectedUser = users.selectedUser.first()
         if (selectedUser != null) syncUser(selectedUser)
     }
 
-    @OptIn(ExperimentalCoroutinesApi::class)
-    private fun selectedProfileChanges(): Flow<ProfileSnapshot> = users.selectedUser.flatMapLatest { user ->
-        if (user == null) {
-            emptyFlow()
-        } else {
-            combine(profiles.brewProfiles, userSettings.favoriteProfiles(user.id)) { allProfiles, favoriteIds ->
-                ProfileSnapshot(
-                    user = user,
-                    profiles = allProfiles.filter { it.userId == user.id },
-                    favoriteIds = favoriteIds,
-                )
-            }.distinctUntilChanged()
-        }
-    }
-
     private suspend fun syncUser(user: User) {
         mutex.withLock {
-            val token = dataStore.data.first()[TOKEN_KEY].orEmpty()
             if (token.isBlank()) {
                 _state.value = ProfileLibrarySyncState(phase = ProfileLibrarySyncState.Phase.NotConfigured)
                 return@withLock
@@ -178,7 +118,7 @@ class ProfileLibrarySyncCoordinator(
         }
     }
 
-    private fun reconcile(
+    internal fun reconcile(
         remote: ProfileLibraryCatalog,
         metadata: ProfileSyncMetadata,
         userId: Long,
@@ -186,11 +126,20 @@ class ProfileLibrarySyncCoordinator(
         favoriteIds: Set<String>,
         pendingDeletions: Set<Long>,
     ): SyncPlan {
-        require(remote.schemaVersion == ProfileLibraryCatalog.CURRENT_SCHEMA_VERSION) {
+        require(remote.schemaVersion in 1..ProfileLibraryCatalog.CURRENT_SCHEMA_VERSION) {
             "Unsupported profile library schema ${remote.schemaVersion}"
         }
         val localById = localProfiles.associateBy { it.id }
-        val records = remote.profiles.associateBy { it.id }.toMutableMap()
+        val defaultProfilesByName = defaultProfiles.getDefaultProfiles(userId)
+            .associateBy { canonicalProfileName(it.name) }
+        val records = remote.profiles.associateBy { it.id }.mapValues { (_, record) ->
+            val standardDescription = defaultProfiles.standardizedDescription(
+                record.profile.name,
+                record.profile.description,
+            )
+            if (standardDescription == null || standardDescription == record.profile.description) record
+            else record.copy(profile = record.profile.copy(description = standardDescription))
+        }.toMutableMap()
         val entries = metadata.entries.associateBy { it.cloudId }.toMutableMap()
         val mappedLocalIds = entries.values.mapNotNull { it.localProfileId.takeIf { id -> id > 0 } }.toMutableSet()
         val remoteToLocal = mutableMapOf<String, Long>()
@@ -291,6 +240,11 @@ class ProfileLibrarySyncCoordinator(
             if (record.deleted) return@forEach
             val matchingLocal = localProfiles.firstOrNull { profile ->
                 profile.id !in mappedLocalIds && profile.toPortableProfile() == record.profile
+            } ?: localProfiles.firstOrNull { profile ->
+                val default = defaultProfilesByName[canonicalProfileName(profile.name)]
+                profile.id !in mappedLocalIds &&
+                    canonicalProfileName(profile.name) == canonicalProfileName(record.profile.name) &&
+                    default?.toPortableProfile() == profile.toPortableProfile()
             }
             if (matchingLocal != null) {
                 remoteToLocal[record.id] = matchingLocal.id
@@ -300,9 +254,7 @@ class ProfileLibrarySyncCoordinator(
             }
         }
 
-        val unchangedDefaults = defaultProfiles.getDefaultProfiles(userId)
-            .map { it.toPortableProfile() }
-            .toSet()
+        val unchangedDefaults = defaultProfilesByName.values.map { it.toPortableProfile() }.toSet()
         localProfiles.filter { it.id !in mappedLocalIds }.forEach { local ->
             val localId = records.keys.firstOrNull { remoteToLocal[it] == local.id }
             val isUnchangedUnstarredDefault =
@@ -323,7 +275,7 @@ class ProfileLibrarySyncCoordinator(
         val orderedRecords = records.values.sortedBy { it.id }
         return SyncPlan(
             catalog = ProfileLibraryCatalog(
-                schemaVersion = ProfileLibraryCatalog.CURRENT_SCHEMA_VERSION,
+                schemaVersion = maxOf(remote.schemaVersion, if (orderedRecords.any { it.profile.program.version == 2 }) 2 else 1),
                 revision = remote.revision,
                 profiles = orderedRecords,
             ),
@@ -420,13 +372,7 @@ class ProfileLibrarySyncCoordinator(
     ): Boolean = left.size == right.size &&
         left.associateBy { it.id } == right.associateBy { it.id }
 
-    private data class ProfileSnapshot(
-        val user: User,
-        val profiles: List<BrewProfile>,
-        val favoriteIds: Set<String>,
-    )
-
-    private data class SyncPlan(
+    internal data class SyncPlan(
         val catalog: ProfileLibraryCatalog,
         val remoteToLocal: Map<String, Long>,
         val conflictCopies: Map<String, BrewProfile>,
@@ -439,11 +385,13 @@ class ProfileLibrarySyncCoordinator(
     )
 
     companion object {
-        private val TOKEN_KEY = stringPreferencesKey("profile_library_sync_token")
-        private val CHANGE_DEBOUNCE = 600.milliseconds
-        private val RETRY_INTERVAL = 15.minutes
         private const val MAX_CONFLICT_RETRIES = 3
     }
 
     private fun metadataKey(userId: Long) = stringPreferencesKey("profile_library_sync_metadata_$userId")
+}
+
+private fun canonicalProfileName(name: String): String = when (name.trim().lowercase()) {
+    "adaptive v2", "adaptive v2 (lita, no scale)" -> "adaptive v2"
+    else -> name.trim().lowercase()
 }

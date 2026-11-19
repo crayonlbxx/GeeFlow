@@ -10,12 +10,12 @@ import kotlin.uuid.Uuid
 
 @Serializable
 data class ProfileLibraryCatalog(
-    val schemaVersion: Int = CURRENT_SCHEMA_VERSION,
+    val schemaVersion: Int = 1,
     val revision: Long = 0,
     val profiles: List<ProfileLibraryRecord> = emptyList(),
 ) {
     companion object {
-        const val CURRENT_SCHEMA_VERSION = 1
+        const val CURRENT_SCHEMA_VERSION = 2
     }
 }
 

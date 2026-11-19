@@ -35,6 +35,10 @@ fun ColorScheme.clearColorScheme(): androidx.compose.material3.ColorScheme {
             outlineVariant = Color(0xFF596570),
             primary = Color(0xFF8DBBFF),
             onPrimary = Color(0xFF10243D),
+            primaryContainer = Color(0xFF2A333B),
+            onPrimaryContainer = Color(0xFFE0E6EB),
+            secondaryContainer = Color(0xFF2A333B),
+            onSecondaryContainer = Color(0xFFE0E6EB),
             tertiary = Color(0xFF7ED5A2),
             onTertiary = Color(0xFF0D2A1A),
         )

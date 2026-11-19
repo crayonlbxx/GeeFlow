@@ -20,6 +20,7 @@ internal data class ProfileEditorViewState(
     val experimental: Boolean = false,
     val supportIssues: List<ProfileIssueCode> = emptyList(),
     val isRecording: Boolean = false,
+    val advancedProgram: Boolean = false,
     val profileName: String = "",
     val description: String = "",
     val displayDescription: String = "",
@@ -35,7 +36,7 @@ internal data class ProfileEditorViewState(
     val dialog: ProfileEditorDialog? = null,
 ) {
     /** A profile made up of nothing but waits would never brew, so it can be neither tested nor saved. */
-    private val hasProgram: Boolean = (isRecording && targetData.isNotEmpty()) || steps.any { it.type != StepType.Wait }
+    private val hasProgram: Boolean = advancedProgram || (isRecording && targetData.isNotEmpty()) || steps.any { it.type != StepType.Wait }
     val canTest: Boolean = supportIssues.isEmpty() && hasProgram
     val canSave: Boolean = profileName.isNotBlank() && hasProgram
     val experimentalControlType: StepType? get() = if (steps.any { it.experimental }) {

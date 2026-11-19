@@ -1,6 +1,6 @@
-CREATE TABLE default_profile_seeds (
+CREATE TABLE pending_brew_profile_deletions (
   userId INTEGER NOT NULL,
-  seedKey TEXT NOT NULL,
-  PRIMARY KEY(userId, seedKey),
+  profileId INTEGER NOT NULL,
+  PRIMARY KEY (userId, profileId),
   FOREIGN KEY(userId) REFERENCES users(id) ON DELETE CASCADE
 );

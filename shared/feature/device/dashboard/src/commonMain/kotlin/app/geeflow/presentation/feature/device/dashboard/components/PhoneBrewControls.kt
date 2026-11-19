@@ -24,6 +24,7 @@ internal fun PhoneBrewControls(
     onEvent: (DeviceDashboardEvent) -> Unit,
     onDetails: () -> Unit,
     targetWeightGrams: Float? = null,
+    stopAtYield: Boolean = false,
     onStartLiveRecipe: (() -> Unit)? = null,
 ) {
     val idle = state.brewButtonState == BrewButtonState.Idle
@@ -53,7 +54,7 @@ internal fun PhoneBrewControls(
             onClick = {
                 if (active) onEvent(DeviceDashboardEvent.StopBrewClicked)
                 else if (onStartLiveRecipe != null) onStartLiveRecipe()
-                else onEvent(DeviceDashboardEvent.BrewClicked(targetWeightGrams))
+                else onEvent(DeviceDashboardEvent.BrewClicked(targetWeightGrams, stopAtYield))
             },
             enabled = idle || active,
             modifier = Modifier.fillMaxWidth().height(64.dp),

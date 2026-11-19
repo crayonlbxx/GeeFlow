@@ -5,6 +5,8 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
@@ -15,6 +17,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.VerticalDivider
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -25,14 +28,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import app.geeflow.data.brew.model.Condition
+import app.geeflow.data.brew.model.BrewProgram
 import app.geeflow.data.user.model.FlowChartRange
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardViewState
+import app.geeflow.presentation.feature.device.dashboard.main.historicalRecipeValues
+import app.geeflow.presentation.feature.device.dashboard.main.shotDurationSeconds
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardViewState.DashboardChartType.FlowRate
 import app.geeflow.presentation.feature.device.dashboard.main.DeviceDashboardViewState.DashboardChartType.Pressure
 import app.geeflow.presentation.feature.device.dashboard.profiles.ProfileListViewState
 import app.geeflow.ui.text.ClearText
 import app.geeflow.ui.text.clearText
-import app.geeflow.ui.theme.GeeFlowTheme
 import geeflow.shared.core.ui.generated.resources.common_pressure
 import geeflow.shared.core.ui.generated.resources.common_sec
 import geeflow.shared.core.ui.generated.resources.common_time
@@ -48,6 +53,8 @@ import geeflow.shared.feature.device.dashboard.generated.resources.device_dashbo
 import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_output
 import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_ready
 import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_target_flow
+import geeflow.shared.feature.device.dashboard.generated.resources.device_dashboard_cup_flow_label
+import geeflow.shared.feature.device.dashboard.generated.resources.dashboard_flow_title
 import geeflow.shared.feature.device.dashboard.generated.resources.dashboard_cup_rate
 import org.jetbrains.compose.resources.stringResource
 import kotlin.math.round
@@ -62,6 +69,7 @@ internal fun ExtractionReadout(
     onToggle: (DeviceDashboardViewState.DashboardChartType) -> Unit,
     modifier: Modifier = Modifier,
     compact: Boolean = false,
+    columns: Int = if (compact) PhoneColumns else TabletColumns,
     cupFlowGramsPerSecond: Float? = null,
     scaleWeightGrams: Float? = null,
     scaleConnected: Boolean = false,
@@ -74,10 +82,10 @@ internal fun ExtractionReadout(
     val connected = state.device.connectionStatus == DeviceDashboardViewState.Device.ConnectionStatus.Connected
     val selectedProfile = profiles.firstOrNull { it.selected }
     val brewProfile = profiles.firstOrNull { state.brew.name.isNotBlank() && it.name == state.brew.name }
-    val activeProfile = if (state.device.isBrewing || history) {
-        brewProfile ?: selectedProfile.takeUnless { history }
-    } else {
-        selectedProfile
+    val activeProfile = when {
+        state.brew.historyId != null -> null // A current profile with the same name is not a historical snapshot.
+        state.device.isBrewing || history -> brewProfile ?: selectedProfile.takeUnless { history }
+        else -> selectedProfile
     }
     val flow = when {
         history || state.device.isBrewing || liveSample != null -> lastPoint?.volumePerSecond?.toDouble()
@@ -103,7 +111,7 @@ internal fun ExtractionReadout(
                 label = stringResource(CoreRes.string.common_pressure),
                 value = pressure?.formatOneDecimal() ?: "—",
                 unit = stringResource(CoreRes.string.unit_bar),
-                accent = GeeFlowTheme.colors.pressure,
+                accent = BrewChartPalette.Pressure,
                 selected = state.visibleCharts.contains(Pressure),
                 onClick = { onToggle(Pressure) },
                 dense = compact,
@@ -111,24 +119,13 @@ internal fun ExtractionReadout(
             )
         },
         { cellModifier ->
-            MetricCard(
-                label = clearText(ClearText.WaterFlow),
-                value = flow?.formatOneDecimal() ?: "—",
-                unit = stringResource(CoreRes.string.unit_milliliters_per_second),
-                footer = listOfNotNull(
-                    output.cupFlow?.let {
-                        val unit = stringResource(CoreRes.string.unit_grams_per_second).replace("/", "\u2060/\u2060")
-                        stringResource(DashboardRes.string.dashboard_cup_rate, "${it.toDouble().formatOneDecimal()}\u00a0$unit")
-                    },
-                    overRange?.let {
-                        stringResource(DashboardRes.string.device_dashboard_flow_range_exceeded, it.formatOneDecimal(), flowRangeMax)
-                    } ?: targetFlow?.let {
-                        stringResource(DashboardRes.string.device_dashboard_target_flow, it.formatOneDecimal())
-                    },
-                ).joinToString("\n").ifBlank { null },
-                accent = GeeFlowTheme.colors.water,
-                selected = state.visibleCharts.contains(FlowRate),
+            FlowRateMetricCard(
+                waterFlow = flow?.formatOneDecimal() ?: "—",
+                cupFlow = output.cupFlow?.toDouble()?.formatOneDecimal() ?: "—",
+                waterLabel = clearText(ClearText.WaterFlow),
+                cupLabel = stringResource(DashboardRes.string.device_dashboard_cup_flow_label),
                 onClick = { onToggle(FlowRate) },
+                selected = state.visibleCharts.contains(FlowRate),
                 dense = compact,
                 modifier = cellModifier,
             )
@@ -136,7 +133,9 @@ internal fun ExtractionReadout(
         { cellModifier ->
             MetricCard(
                 label = stringResource(CoreRes.string.common_time),
-                value = (liveSample?.key?.toDouble() ?: state.brew.time.coerceAtLeast(0).toDouble()).formatOneDecimal(),
+                value = (liveSample?.key?.toDouble()
+                    ?: state.brew.shotDurationSeconds.takeIf { state.brew.historyId != null }
+                    ?: state.brew.time.coerceAtLeast(0).toDouble()).formatOneDecimal(),
                 unit = stringResource(CoreRes.string.common_sec),
                 accent = MaterialTheme.colorScheme.onSurfaceVariant,
                 selected = false,
@@ -150,7 +149,7 @@ internal fun ExtractionReadout(
                 value = output.value,
                 unit = output.unit,
                 footer = output.note,
-                accent = MaterialTheme.colorScheme.tertiary,
+                accent = BrewChartPalette.Weight,
                 selected = false,
                 dense = compact,
                 modifier = cellModifier,
@@ -158,14 +157,59 @@ internal fun ExtractionReadout(
         },
     )
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        cells.chunked(if (compact) PhoneColumns else TabletColumns).forEach { row ->
+        cells.chunked(columns.coerceIn(1, TabletColumns)).forEach { row ->
             Row(
                 Modifier.fillMaxWidth()
-                    .heightIn(min = if (compact) PhoneMetricCardHeight else StandardMetricCardHeight)
+                    .heightIn(min = if (compact) CompactMetricCardHeight else StandardMetricCardHeight)
                     .height(IntrinsicSize.Min),
                 horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 row.forEach { cell -> cell(Modifier.weight(1f).fillMaxHeight()) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FlowRateMetricCard(
+    waterFlow: String,
+    cupFlow: String,
+    waterLabel: String,
+    cupLabel: String,
+    selected: Boolean,
+    dense: Boolean,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier
+            .clip(MaterialTheme.shapes.medium)
+            .background(if (selected) BrewChartPalette.WaterFlow.copy(alpha = MetricTintAlpha) else MaterialTheme.colorScheme.surface)
+            .clickable(onClick = onClick),
+    ) {
+        Box(Modifier.width(4.dp).fillMaxHeight().background(if (selected) BrewChartPalette.WaterFlow else BrewChartPalette.WaterFlow.copy(alpha = InactiveAccentAlpha)))
+        Column(
+            Modifier.weight(1f).padding(horizontal = 7.dp, vertical = if (dense) 3.dp else 7.dp),
+            verticalArrangement = Arrangement.spacedBy(1.dp),
+        ) {
+            Text(stringResource(DashboardRes.string.dashboard_flow_title), style = MaterialTheme.typography.labelMedium,
+                fontWeight = FontWeight.SemiBold, maxLines = 1)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(waterLabel, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = BrewChartPalette.WaterFlow, maxLines = 1)
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(waterFlow, style = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum"), fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 1)
+                        Text(" ml/s", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    }
+                }
+                VerticalDivider(Modifier.height(30.dp).padding(horizontal = 2.dp))
+                Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+                    Text(cupLabel, style = MaterialTheme.typography.labelSmall, fontSize = 10.sp, color = BrewChartPalette.CupFlow, maxLines = 1)
+                    Row(verticalAlignment = Alignment.Bottom) {
+                        Text(cupFlow, style = MaterialTheme.typography.titleSmall.copy(fontFeatureSettings = "tnum"), fontWeight = FontWeight.SemiBold, fontSize = 16.sp, maxLines = 1)
+                        Text(" g/s", style = MaterialTheme.typography.labelSmall, fontSize = 9.sp, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1)
+                    }
+                }
             }
         }
     }
@@ -188,15 +232,27 @@ private fun outputReading(
     val history = state.readingsAreHistorical()
     val finish = profile?.finishCondition
     val historicalStopTarget = state.brew.historyStopWeightGrams
+    val historicalRecipeTarget = if (state.brew.historyId != null) {
+        historicalRecipeValues(
+            state.brew.doseGrams,
+            state.brew.recipeRatio,
+            state.brew.recipeTargetGrams,
+            (state.brew.phaseProgram as? BrewProgram.Phases)?.recipe?.settings,
+        ).third?.toDouble()
+    } else null
     val volumeFinish = targetWeightGrams == null && nativeTargetWeightGrams == null &&
         historicalStopTarget == null && finish is Condition.Volume
-    val target = targetWeightGrams ?: nativeTargetWeightGrams ?: historicalStopTarget?.toDouble() ?: when (finish) {
+    val target = historicalRecipeTarget ?: targetWeightGrams ?: nativeTargetWeightGrams ?: historicalStopTarget?.toDouble() ?: when (finish) {
         is Condition.Weight -> finish.target
         is Condition.Volume -> finish.target
         null -> null
     }
     val connected = state.device.connectionStatus == DeviceDashboardViewState.Device.ConnectionStatus.Connected
-    val liveScaleWeight = if (targetWeightGrams != null) scaleWeightGrams?.toDouble() else weight
+    val liveScaleWeight = when {
+        targetWeightGrams != null -> scaleWeightGrams?.toDouble()
+        history && state.brew.historyFinalWeightGrams != null -> state.brew.historyFinalWeightGrams.toDouble()
+        else -> weight
+    }
     val canReadOutput = if (targetWeightGrams != null) {
         scaleConnected && liveScaleWeight != null
     } else if (volumeFinish) {
@@ -270,14 +326,14 @@ private fun MetricCard(
             androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.End,
+                horizontalArrangement = Arrangement.Start,
                 verticalAlignment = Alignment.Bottom,
             ) {
                 Text(
                     value,
                     modifier = Modifier.weight(1f, fill = false),
-                    fontSize = if (dense) 22.sp else 32.sp,
-                    lineHeight = if (dense) 26.sp else 36.sp,
+                    fontSize = if (dense) 20.sp else 32.sp,
+                    lineHeight = if (dense) 24.sp else 36.sp,
                     fontWeight = FontWeight.Medium,
                     style = MaterialTheme.typography.headlineMedium.copy(fontFeatureSettings = "tnum"),
                     color = MaterialTheme.colorScheme.onSurface,
@@ -325,4 +381,5 @@ private const val InactiveAccentAlpha = 0.35f
 private const val PhoneColumns = 2
 private const val TabletColumns = 4
 private val PhoneMetricCardHeight = 68.dp
+private val CompactMetricCardHeight = 68.dp
 private val StandardMetricCardHeight = 92.dp

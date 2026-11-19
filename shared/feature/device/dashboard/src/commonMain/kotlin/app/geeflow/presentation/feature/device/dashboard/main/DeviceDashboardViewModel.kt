@@ -9,7 +9,10 @@ import app.geeflow.core.presentation.toUserMessage
 import app.geeflow.data.brew.model.BrewMode
 import app.geeflow.data.brew.model.BrewProfile
 import app.geeflow.data.brew.model.BrewSession
+import app.geeflow.data.brew.model.BrewScaleSample
 import app.geeflow.data.brew.model.Condition
+import app.geeflow.data.device.BookooScalePacketEvent
+import app.geeflow.data.device.ScaleReadingSource
 import app.geeflow.data.device.model.DeviceCapability
 import app.geeflow.data.device.model.DeviceState
 import app.geeflow.data.device.model.DeviceState.BrewStatus
@@ -21,7 +24,12 @@ import app.geeflow.domain.brew.usecase.GetBrewProfileUseCase
 import app.geeflow.domain.brew.usecase.ObserveBrewDataUseCase
 import app.geeflow.domain.brew.usecase.ObserveDeviceProfileUseCase
 import app.geeflow.domain.brew.usecase.SaveBrewToHistoryUseCase
+import app.geeflow.domain.brew.usecase.SaveBrewShotMetadataUseCase
+import app.geeflow.presentation.feature.device.dashboard.model.brewShotSummary
 import app.geeflow.domain.device.usecase.ConnectDeviceUseCase
+import app.geeflow.domain.device.ProfileExecutionCoordinator
+import app.geeflow.domain.device.CupFlowEstimator
+import app.geeflow.domain.device.toBrewScaleSample
 import app.geeflow.domain.device.usecase.DisconnectDeviceUseCase
 import app.geeflow.domain.device.usecase.ObserveDeviceBrewingSettingsUseCase
 import app.geeflow.domain.device.usecase.ObserveDeviceCapabilitiesUseCase
@@ -35,6 +43,8 @@ import app.geeflow.domain.device.usecase.StopBrewingUseCase
 import app.geeflow.domain.exception.DeviceNotConnectedException
 import app.geeflow.domain.user.usecase.GetFlowChartRangeUseCase
 import app.geeflow.domain.user.usecase.GetSelectedUserUseCase
+import app.geeflow.domain.user.usecase.GetPreferredShotDoseUseCase
+import app.geeflow.domain.user.usecase.SetPreferredShotDoseUseCase
 import app.geeflow.domain.user.usecase.GetVisibleChartsUseCase
 import app.geeflow.domain.user.usecase.SetFlowChartRangeUseCase
 import app.geeflow.domain.user.usecase.ToggleChartVisibilityUseCase
@@ -86,12 +96,17 @@ import app.geeflow.presentation.feature.device.dashboard.model.toTargetData
 import co.touchlab.kermit.Logger
 import geeflow.shared.feature.device.dashboard.generated.resources.Res
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.jetbrains.compose.resources.getString
 import org.koin.core.annotation.InjectedParam
 import org.koin.core.annotation.KoinViewModel
 import kotlin.math.pow
 import kotlin.math.round
+import kotlin.time.Clock
+import kotlin.time.Duration.Companion.seconds
 import app.geeflow.data.device.model.Device as Machine
 
 @KoinViewModel
@@ -116,8 +131,13 @@ internal class DeviceDashboardViewModel(
     private val setFlowChartRange: SetFlowChartRangeUseCase,
     private val getBrewProfileUseCase: GetBrewProfileUseCase,
     private val getSelectedUser: GetSelectedUserUseCase,
+    private val getPreferredShotDose: GetPreferredShotDoseUseCase,
+    private val setPreferredShotDose: SetPreferredShotDoseUseCase,
+    private val scaleReadings: ScaleReadingSource,
     private val saveBrewToHistory: SaveBrewToHistoryUseCase,
+    private val saveBrewShotMetadata: SaveBrewShotMetadataUseCase,
     private val observeDeviceBrewingSettings: ObserveDeviceBrewingSettingsUseCase,
+    private val profileExecutionCoordinator: ProfileExecutionCoordinator,
 ) : BaseViewModel<DeviceDashboardViewState, DeviceDashboardViewModelEvent>(DeviceDashboardViewState()) {
 
     private var selectedProfileId: String? = null
@@ -127,10 +147,40 @@ internal class DeviceDashboardViewModel(
     private var machineBusy = false
     private var brewInProgress = false
     private var pendingAppProfile: BrewProfile? = null
+    private data class PendingShotRecipe(val dose: Float, val ratio: Float, val target: Float, val armedAt: kotlin.time.Instant)
+    private var pendingShotRecipe: PendingShotRecipe? = null
     private var activeBrewProfile: BrewProfile? = null
     private var skipManualBrews = true
+    private var activeScaleBrewStart: kotlin.time.Instant? = null
+    private var activeScaleCaptureUntil: kotlin.time.Instant? = null
+    private val activeScaleSamples = mutableListOf<BrewScaleSample>()
+    private var previousScaleSample: BrewScaleSample? = null
+    private val scaleFlowSmoother = CupFlowEstimator(windowMillis = 1_000L, minimumWindowMillis = 500L)
+    private val scaleCaptureMutex = Mutex()
+    private val recentScalePackets = mutableListOf<BookooScalePacketEvent>()
+    private val appendedScalePacketKeys = mutableSetOf<String>()
 
     init {
+        launch {
+            profileExecutionCoordinator.state.collect { execution ->
+                if (execution.deviceId == args.deviceId) {
+                    val trace = execution.trace ?: return@collect
+                    modify {
+                        copy(
+                            brew = brew.copy(
+                                historyStopWeightGrams = trace.stopTargetGrams ?: brew.historyStopWeightGrams,
+                                historyFinalWeightGrams = trace.finalScaleWeightGrams ?: brew.historyFinalWeightGrams,
+                                scaleSamples = trace.scaleSamples,
+                            ),
+                        )
+                    }
+                }
+            }
+        }
+        launch {
+            getPreferredShotDose().collect { dose -> modify { copy(preferredShotDoseGrams = dose) } }
+        }
+        launch { scaleReadings.packets.collect(::captureBookooPacket) }
         launch {
             observeDevice(args.deviceId).collect {
                 machine = it
@@ -193,15 +243,41 @@ internal class DeviceDashboardViewModel(
         is ManualBrewClicked -> launchCatching(::onError) { startManualBrewing(args.deviceId) }
         is StopBrewClicked -> launchCatching(::onError) { stopBrewing(args.deviceId) }
         is FlowControlClicked -> navigate(To(FreeControl(args.deviceId)))
-        is BrewClicked -> startProfile(event.targetWeightGrams)
+        is BrewClicked -> startProfile(event)
+        is DeviceDashboardEvent.ShotDoseChanged -> launchCatching(::onError) {
+            setPreferredShotDose(event.doseGrams)
+            modify { copy(preferredShotDoseGrams = event.doseGrams) }
+        }
+        is DeviceDashboardEvent.GrindDraftChanged -> modify { copy(grindDraft = event.value) }
+        is DeviceDashboardEvent.GrindSettingChanged -> {
+            val value = event.value.trim().takeIf { it.isNotEmpty() }
+            modify { copy(brew = brew.copy(grindSetting = value)) }
+            viewState.value.brew.startedAt?.let { startedAt ->
+                saveBrewShotMetadata.updateGrindSetting(args.deviceId, startedAt, value)
+                if (viewState.value.brew.historyId == null) profileExecutionCoordinator.updateShotMetadata(
+                    deviceId = args.deviceId,
+                    startedAt = startedAt,
+                    doseGrams = viewState.value.brew.doseGrams,
+                    grindSetting = value,
+                    extractionStartMillis = viewState.value.brew.extractionStartMillis,
+                    extractionStartEstimated = viewState.value.brew.extractionStartEstimated,
+                )
+            }
+        }
+        is DeviceDashboardEvent.ExtractionPhaseStarted -> {
+            modify { copy(brew = brew.copy(extractionStartMillis = event.elapsedMillis, extractionStartEstimated = false)) }
+            persistShotMetadata(viewState.value.brew)
+        }
         is DeviceDashboardEvent.LiveRecipeSelected -> modify {
             copy(
-                brew = brew.copy(
+                brew = (if (brew.historyId != null) Brew() else brew).copy(
                     name = event.name,
                     description = event.description,
                     historyTarget = null,
                     historyStopWeightGrams = null,
                     phaseProgram = null,
+                    isLiveRecipe = true,
+                    extractionPhaseId = event.extractionPhaseId,
                 ),
             )
         }
@@ -211,12 +287,25 @@ internal class DeviceDashboardViewModel(
             copy(
                 brew = Brew(
                     name = event.name,
+                    description = event.description,
                     time = event.durationSeconds,
                     data = event.data,
+                    scaleSamples = event.scaleSamples,
                     historyTarget = event.targetData,
                     historyStopWeightGrams = event.targetWeightGrams,
                     phaseProgram = event.phaseProgram,
                     phaseTransitions = event.phaseTransitions,
+                    recordedPhaseIds = event.recordedPhaseIds,
+                    historyId = event.id,
+                    startedAt = event.startedAt,
+                    endedAt = event.endedAt,
+                    doseGrams = event.doseGrams,
+                    recipeRatio = event.recipeRatio,
+                    recipeTargetGrams = event.recipeTargetGrams,
+                    grindSetting = event.grindSetting,
+                    extractionStartMillis = event.extractionStartMillis,
+                    extractionStartEstimated = event.extractionStartEstimated,
+                    finalWeightGrams = event.finalWeightGrams,
                 ),
             )
         }
@@ -254,7 +343,9 @@ internal class DeviceDashboardViewModel(
         navigate(To(ProfileEditor(args.deviceId, profileId)))
     }
 
-    private fun startProfile(targetWeightGrams: Float?) = launchCatching(::onError) {
+    private fun startProfile(event: BrewClicked) = launchCatching(::onError) {
+        val targetWeightGrams = event.targetWeightGrams
+        val stopAtYield = event.stopAtYield
         selectedProfileId
             ?.toLongOrNull()
             ?.let { getBrewProfileUseCase(it) }
@@ -262,16 +353,38 @@ internal class DeviceDashboardViewModel(
                 var started = false
                 try {
                     modify { copy(brewButtonState = BrewButtonState.Syncing) }
-                    val shotProfile = if (targetWeightGrams != null && profile.finishCondition is app.geeflow.data.brew.model.Condition.Weight) {
-                        profile.copy(finishCondition = app.geeflow.data.brew.model.Condition.Weight(targetWeightGrams))
-                    } else {
-                        profile
+                    val recipeWeightTarget =
+                        (profile.finishCondition as? app.geeflow.data.brew.model.Condition.Weight)?.target
+                    val cutoffWeightTarget = targetWeightGrams?.let { requestedTarget ->
+                        recipeWeightTarget?.let { recipeTarget -> earlierWeightTarget(recipeTarget, requestedTarget) }
+                            ?: requestedTarget
+                    }
+                    val machineScaleAvailable = viewState.value.device.smartScaleConnected
+                    val shotProfile = when {
+                        recipeWeightTarget != null && cutoffWeightTarget != null && stopAtYield ->
+                            profile.copy(finishCondition = app.geeflow.data.brew.model.Condition.Weight(cutoffWeightTarget))
+                        recipeWeightTarget != null && !machineScaleAvailable && !stopAtYield ->
+                            profile.copy(finishCondition = null)
+                        else -> profile
                     }
                     pendingAppProfile = shotProfile
-                    startProfileBrewing(args.deviceId, shotProfile)
+                    pendingShotRecipe = listOf(event.recipeDoseGrams, event.recipeRatio, event.recipeTargetGrams)
+                        .takeIf { values -> values.all { it != null && it.isFinite() && it > 0f } }
+                        ?.let { PendingShotRecipe(it[0]!!, it[1]!!, it[2]!!, Clock.System.now()) }
+                    val weightStopUnavailable = startProfileBrewing(
+                        args.deviceId,
+                        shotProfile,
+                        stopAtWeightGrams = cutoffWeightTarget.takeIf { stopAtYield },
+                    )
                     started = true
+                    if (weightStopUnavailable) {
+                        emitEvent(DeviceDashboardViewModelEvent.ShowSnackbar("Scale not ready: this brew will not stop at the selected weight."))
+                    }
                 } finally {
-                    if (!started) pendingAppProfile = null
+                    if (!started) {
+                        pendingAppProfile = null
+                        pendingShotRecipe = null
+                    }
                     modify {
                         copy(
                             brewButtonState = if (machineBusy) {
@@ -284,7 +397,6 @@ internal class DeviceDashboardViewModel(
                         )
                     }
                 }
-                emitEvent(DeviceDashboardViewModelEvent.SwitchToDetails)
             }
     }
 
@@ -299,7 +411,19 @@ internal class DeviceDashboardViewModel(
         selectedProfileId = profile.id.toString()
         selectedProfileName = profile.name
         selectedProfileDescription = profile.displayDescription()
-        modify { copy(brew = Brew(name = profile.name, description = selectedProfileDescription.orEmpty())) }
+        val activeExecution = profileExecutionCoordinator.state.value.takeIf {
+            it.deviceId == args.deviceId && it.active
+        }?.trace
+        modify {
+            copy(
+                brew = Brew(
+                    name = profile.name,
+                    description = selectedProfileDescription.orEmpty(),
+                    historyStopWeightGrams = activeExecution?.stopTargetGrams,
+                    historyFinalWeightGrams = activeExecution?.finalScaleWeightGrams,
+                ),
+            )
+        }
     }
 
     private fun updateMachineStateUi(state: DeviceState, hotWaterSupported: Boolean) {
@@ -360,22 +484,90 @@ internal class DeviceDashboardViewModel(
         }
 
         if (!wasBrewing && session.inProgress) {
+            val startedAt = session.startTime ?: kotlin.time.Clock.System.now()
+            val pendingRecipe = pendingShotRecipe?.takeIf {
+                session.mode == BrewMode.Profile && startedAt >= it.armedAt - 2.seconds && startedAt <= it.armedAt + 60.seconds
+            }
+            pendingShotRecipe = null
+            val pendingBrew = viewState.value.brew
+            val pendingGrind = viewState.value.grindDraft.trim().takeIf { it.isNotEmpty() }
+            val pendingName = pendingBrew.name.takeIf { pendingBrew.isLiveRecipe }
+            val pendingDescription = pendingBrew.description.takeIf { pendingBrew.isLiveRecipe }
+            val pendingExtractionPhaseId = pendingBrew.extractionPhaseId.takeIf { pendingBrew.isLiveRecipe }
+            scaleCaptureMutex.withLock {
+                activeScaleBrewStart = startedAt
+                activeScaleCaptureUntil = null
+                activeScaleSamples.clear()
+                previousScaleSample = null
+                scaleFlowSmoother.reset()
+                appendedScalePacketKeys.clear()
+                scaleReadings.packets.replayCache
+                    .filter { it.receivedAt >= startedAt }
+                    .sortedBy { it.receivedAt }
+                    .forEach(::appendScalePacket)
+                recentScalePackets.removeAll { it.receivedAt < startedAt }
+            }
             selectBrewSessionProfile(session)
             val description = activeBrewProfile?.displayDescription().orEmpty()
             modify {
                 copy(
                     brew = Brew(
-                        name = activeBrewProfile?.name.orEmpty(),
-                        description = description,
+                        name = pendingName ?: activeBrewProfile?.name.orEmpty(),
+                        description = pendingDescription ?: description,
+                        startedAt = startedAt,
+                        doseGrams = pendingRecipe?.dose ?: viewState.value.preferredShotDoseGrams,
+                        recipeRatio = pendingRecipe?.ratio,
+                        recipeTargetGrams = pendingRecipe?.target,
+                        grindSetting = pendingGrind,
+                        phaseProgram = activeBrewProfile?.program,
+                        isLiveRecipe = pendingBrew.isLiveRecipe,
+                        extractionPhaseId = pendingExtractionPhaseId,
                     ),
+                    grindDraft = "",
                 )
             }
+            persistShotMetadata(viewState.value.brew)
+        }
+        val scaleSamples = scaleCaptureMutex.withLock {
+            if (session.inProgress || wasBrewing) activeScaleSamples.toList() else session.scaleSamples
+        }
+        val recordedData = session.toChartData()
+        val phaseProgram = session.executionTrace?.profile?.program ?: activeBrewProfile?.program
+            ?: viewState.value.brew.phaseProgram
+        val phaseTransitions = session.executionTrace?.transitions.orEmpty()
+        val currentBrew = viewState.value.brew
+        val endSeconds = session.endedAt?.let { endedAt ->
+            session.startTime?.let { startedAt -> (endedAt - startedAt).inWholeMilliseconds / 1000.0 }
+        }
+        val finalWeight = scaleSamples.lastOrNull { it.decoded }?.weightGrams
+            ?: recordedData.maxByOrNull { it.key }?.value?.weight?.takeIf { it > 0f }
+        val summary = brewShotSummary(
+            measurements = recordedData,
+            scaleSamples = scaleSamples,
+            profileProgram = phaseProgram,
+            phaseTransitions = phaseTransitions,
+            recordedExtractionStartMillis = currentBrew.extractionStartMillis,
+            extractionStartEstimated = currentBrew.extractionStartEstimated,
+            recordedEndSeconds = endSeconds,
+            finalWeightGrams = finalWeight,
+            shotInProgress = session.inProgress,
+        )
+        val resolvedExtractionStartMillis = if (
+            summary.preinfusionTimeSeconds != null &&
+            (!session.inProgress || summary.preinfusionTimeSeconds <= session.elapsedSeconds.toDouble())
+        ) {
+            (summary.preinfusionTimeSeconds * 1000).toLong()
+        } else currentBrew.extractionStartMillis
+        val splitEstimated = resolvedExtractionStartMillis?.let {
+            currentBrew.extractionStartMillis?.let { currentBrew.extractionStartEstimated == true }
+                ?: summary.splitEstimated
         }
         modify {
             copy(
                 brew = brew.copy(
                     time = session.elapsedSeconds,
-                    data = session.toChartData(),
+                    data = recordedData,
+                    scaleSamples = scaleSamples,
                     historyTarget = session.executionTrace?.let { trace ->
                         if (session.inProgress) trace.profile.program.toTargetData(trace.transitions) else trace.toTargetData()
                     } ?: brew.historyTarget,
@@ -384,12 +576,72 @@ internal class DeviceDashboardViewModel(
                     )?.target
                         ?: (activeBrewProfile?.finishCondition as? Condition.Weight)?.target
                         ?: brew.historyStopWeightGrams,
-                    phaseProgram = session.executionTrace?.profile?.program,
-                    phaseTransitions = session.executionTrace?.transitions.orEmpty(),
+                    phaseProgram = phaseProgram,
+                    phaseTransitions = phaseTransitions,
+                    recordedPhaseIds = session.executionTrace?.targets.orEmpty().mapNotNull { it.phaseId }.toSet(),
+                    startedAt = session.startTime ?: brew.startedAt,
+                    endedAt = session.endedAt,
+                    doseGrams = brew.doseGrams ?: if (session.inProgress) preferredShotDoseGrams else null,
+                    extractionStartMillis = resolvedExtractionStartMillis,
+                    extractionStartEstimated = splitEstimated,
+                    finalWeightGrams = finalWeight,
                 ),
             )
         }
-        if (wasBrewing && !session.inProgress) recordBrew(session)
+        val updatedBrew = viewState.value.brew
+        if (!session.inProgress || currentBrew.extractionStartMillis != updatedBrew.extractionStartMillis) {
+            persistShotMetadata(updatedBrew)
+        }
+        if (wasBrewing && !session.inProgress) {
+            val completedSamples = scaleCaptureMutex.withLock {
+                activeScaleCaptureUntil = (viewState.value.brew.endedAt ?: Clock.System.now()) + 3.seconds
+                activeScaleSamples.toList()
+            }
+            recordBrew(session.copy(scaleSamples = completedSamples))
+        }
+    }
+
+    private suspend fun captureBookooPacket(packet: BookooScalePacketEvent) = scaleCaptureMutex.withLock {
+        recentScalePackets += packet
+        if (recentScalePackets.size > MAX_RECENT_SCALE_PACKETS) recentScalePackets.removeAt(0)
+        val startedAt = activeScaleBrewStart ?: return@withLock
+        if (packet.receivedAt < startedAt) return@withLock
+        val captureUntil = activeScaleCaptureUntil
+        if (captureUntil != null && packet.receivedAt > captureUntil) {
+            activeScaleBrewStart = null
+            activeScaleCaptureUntil = null
+            return@withLock
+        }
+        appendScalePacket(packet)
+    }
+
+    private fun appendScalePacket(packet: BookooScalePacketEvent) {
+        val startedAt = activeScaleBrewStart ?: return
+        if (packet.receivedAt < startedAt) return
+        val key = "${packet.receivedAt.toEpochMilliseconds()}:${packet.packetHex}"
+        if (!appendedScalePacketKeys.add(key)) return
+        val elapsed = (packet.receivedAt - startedAt).inWholeMilliseconds.coerceAtLeast(0L)
+        val smoothedFlow = if (packet.decoded) packet.frame?.let { scaleFlowSmoother.add(elapsed, it.weightGrams) } else null
+        val sample = packet.toBrewScaleSample(startedAt, previousScaleSample, smoothedFlow)
+        if (sample.decoded) previousScaleSample = sample
+        val sampleWeight = sample.weightGrams
+        activeScaleSamples += sample
+        val recordedSamples = activeScaleSamples.toList()
+        val currentBrew = viewState.value.brew
+        val postStop = currentBrew.startedAt == startedAt && currentBrew.endedAt != null
+        if (currentBrew.startedAt == startedAt) {
+            modify {
+                copy(
+                    brew = brew.copy(
+                        scaleSamples = recordedSamples,
+                        finalWeightGrams = if (postStop && sample.decoded) sampleWeight ?: brew.finalWeightGrams else brew.finalWeightGrams,
+                    ),
+                )
+            }
+        }
+        if (postStop && sample.decoded && sampleWeight != null) {
+            saveBrewShotMetadata.updateFinalWeight(args.deviceId, startedAt, sampleWeight)
+        }
     }
 
     /**
@@ -403,8 +655,6 @@ internal class DeviceDashboardViewModel(
             ?: if (session.mode == BrewMode.Profile) observeDeviceProfile(args.deviceId).first() else null
         activeBrewProfile?.let { profile ->
             selectProfile(profile)
-            emitEvent(DeviceDashboardViewModelEvent.SelectProfile(profile.id.toString()))
-            emitEvent(DeviceDashboardViewModelEvent.SwitchToDetails)
         }
     }
 
@@ -412,15 +662,57 @@ internal class DeviceDashboardViewModel(
     private fun recordBrew(session: BrewSession) {
         val profile = activeBrewProfile
         launchCatching(::onError) {
+            val brew = viewState.value.brew
+            val summary = brewShotSummary(
+                measurements = session.toChartData(),
+                scaleSamples = session.scaleSamples,
+                profileProgram = brew.phaseProgram ?: profile?.program,
+                phaseTransitions = session.executionTrace?.transitions.orEmpty(),
+                recordedExtractionStartMillis = brew.extractionStartMillis,
+                extractionStartEstimated = brew.extractionStartEstimated,
+                recordedEndSeconds = session.endedAt?.let { endedAt ->
+                    session.startTime?.let { startedAt -> (endedAt - startedAt).inWholeMilliseconds / 1000.0 }
+                },
+                finalWeightGrams = brew.finalWeightGrams,
+            )
             saveBrewToHistory(
                 deviceId = args.deviceId,
                 session = session,
                 profileId = profile?.id,
-                profileName = profile?.name,
+                profileName = brew.name.takeIf { brew.isLiveRecipe } ?: profile?.name,
                 profileSteps = profile?.steps.orEmpty(),
                 profileRecording = profile?.recording,
+                profileProgram = brew.phaseProgram ?: profile?.program,
+                doseGrams = brew.doseGrams,
+                grindSetting = brew.grindSetting,
+                extractionStartMillis = summary.preinfusionTimeSeconds?.let { (it * 1000).toLong() },
+                extractionStartEstimated = summary.preinfusionTimeSeconds?.let { summary.splitEstimated },
             )
         }
+    }
+
+    private fun persistShotMetadata(brew: DeviceDashboardViewState.Brew) {
+        val startedAt = brew.startedAt ?: return
+        saveBrewShotMetadata(
+            deviceId = args.deviceId,
+            startedAt = startedAt,
+            doseGrams = brew.doseGrams,
+            grindSetting = brew.grindSetting,
+            endedAt = brew.endedAt,
+            extractionStartMillis = brew.extractionStartMillis,
+            extractionStartEstimated = brew.extractionStartEstimated,
+            finalWeightGrams = brew.finalWeightGrams,
+            recipeRatio = brew.recipeRatio,
+            recipeTargetGrams = brew.recipeTargetGrams,
+        )
+        profileExecutionCoordinator.updateShotMetadata(
+            deviceId = args.deviceId,
+            startedAt = startedAt,
+            doseGrams = brew.doseGrams,
+            grindSetting = brew.grindSetting,
+            extractionStartMillis = brew.extractionStartMillis,
+            extractionStartEstimated = brew.extractionStartEstimated,
+        )
     }
 
     private fun chartsVisibilityChanged(charts: Set<ChartType>) = modify {
@@ -431,9 +723,12 @@ internal class DeviceDashboardViewModel(
         copy(flowChartRange = range)
     }
 
-    private fun withBluetoothPermissions(block: suspend () -> Unit) = launch {
+    internal fun withBluetoothPermissions(
+        requireBluetoothPermission: Boolean = false,
+        block: suspend () -> Unit,
+    ) = launch {
         try {
-            if (machine?.isDemo == false) {
+            if (requireBluetoothPermission || machine?.isDemo == false) {
                 permissionsController.providePermission(PermissionBluetoothScan)
                 permissionsController.providePermission(PermissionBluetoothConnect)
             }
@@ -468,6 +763,8 @@ internal class DeviceDashboardViewModel(
         DashboardChartType.Weight -> ChartType.WEIGHT
     }
 }
+
+private const val MAX_RECENT_SCALE_PACKETS = 256
 
 private fun Float.roundDecimalsTo(decimals: Int): Float {
     val factor = 10f.pow(decimals)
